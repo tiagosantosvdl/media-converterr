@@ -307,6 +307,26 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(mc.job_steps(info, "hdr10-pq", "low bitrate", []), ["Remuxing", "Checking output",
                                                                              "Installing"])
 
+    def test_queue_shows_active_jobs_and_remove(self):
+        self.request("/setup", {"skip": "1"})
+        conn = mc.connect_database(mc.load_settings(self.config).database_path)
+        for path, state in (("/tv/a.mkv", "queued"), ("/tv/b.mkv", "cancelled"), ("/tv/c.mkv", "failed")):
+            conn.execute("INSERT INTO jobs(path, state, trigger, enqueued_at, available_at, attempts) "
+                         "VALUES(?,?,'scan',0,0,0)", (path, state))
+        conn.commit()
+        queue = self.request("/queue")[2]
+        self.assertIn("a.mkv", queue)
+        self.assertNotIn("b.mkv", queue)
+        failed = self.request("/errors")[2]
+        self.assertIn("b.mkv", failed)
+        self.assertIn("c.mkv", failed)
+        job = conn.execute("SELECT id FROM jobs WHERE path='/tv/b.mkv'").fetchone()[0]
+        queued = conn.execute("SELECT id FROM jobs WHERE path='/tv/a.mkv'").fetchone()[0]
+        self.assertEqual(self.request(f"/remove/{job}", {})[0], 303)
+        self.request(f"/remove/{queued}", {})  # a queued job can't be removed this way
+        self.assertEqual([r[0] for r in conn.execute("SELECT path FROM jobs ORDER BY path")], ["/tv/a.mkv", "/tv/c.mkv"])
+        conn.close()
+
     def test_cross_site_posts_are_refused(self):
         self.request("/setup", {"skip": "1"})
         def post(headers):

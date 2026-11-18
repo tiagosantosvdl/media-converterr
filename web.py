@@ -107,7 +107,7 @@ def read_progress(work_dir: str) -> dict | None:
     return out
 
 
-STATE_LABELS = {"running": "info", "queued": "", "retry_wait": "warn", "failed": "bad", "cancelled": "",
+STATE_LABELS = {"running": "info", "queued": "", "retry_wait": "warn", "failed": "bad", "cancelled": "outline",
                 "done": "ok"}
 
 
@@ -151,9 +151,8 @@ class Dashboard:
     def queue(self) -> str:
         with self.db() as c:
             running = c.execute("SELECT * FROM jobs WHERE state='running' ORDER BY started_at").fetchall()
-            rows = c.execute("SELECT * FROM jobs WHERE state IN ('queued','retry_wait','failed','cancelled') "
-                             "ORDER BY CASE state WHEN 'queued' THEN 1 WHEN 'retry_wait' THEN 2 ELSE 3 END, "
-                             "available_at LIMIT 500").fetchall()
+            rows = c.execute("SELECT * FROM jobs WHERE state IN ('queued','retry_wait') "
+                             "ORDER BY CASE state WHEN 'queued' THEN 1 ELSE 2 END, available_at LIMIT 500").fetchall()
             avg = c.execute("SELECT AVG(finished_at-started_at) FROM (SELECT * FROM jobs WHERE state='done' AND "
                             "started_at IS NOT NULL ORDER BY finished_at DESC LIMIT 20)").fetchone()[0]
         progress = read_progress(self.settings.work_dir)
@@ -251,9 +250,10 @@ class Dashboard:
                                 "GROUP BY note ORDER BY n DESC", self.scope_args).fetchall()
             sample = c.execute(f"SELECT path, note, last_checked FROM files WHERE status='error' AND {self.scope} "
                                "ORDER BY last_checked DESC LIMIT 200", self.scope_args).fetchall()
-            failed = c.execute("SELECT * FROM jobs WHERE state='failed' ORDER BY finished_at DESC LIMIT 100").fetchall()
+            failed = c.execute("SELECT * FROM jobs WHERE state IN ('failed','cancelled') "
+                               "ORDER BY finished_at DESC LIMIT 200").fetchall()
         body = ["<h1>Failed</h1><p class='muted'>Files under the configured library folders only.</p>",
-                "<h2>Failed queue jobs</h2>", self._jobs_table(failed, actions=True),
+                "<h2>Failed and cancelled jobs</h2>", self._jobs_table(failed, actions=True),
                 "<h2>Files with errors, by message</h2>",
                 table(["Message", "Files"], ([f"<span class='bad'>{esc(r['note'])}</span>", str(r["n"])]
                                              for r in grouped)),
@@ -286,6 +286,16 @@ class Dashboard:
         finally:
             conn.close()
 
+    def remove(self, job_id: int) -> bool:
+        """Delete a failed or cancelled job's queue row (its file and the file's record are untouched)."""
+        conn = self.db(write=True)
+        try:
+            with conn:
+                return conn.execute("DELETE FROM jobs WHERE id=? AND state IN ('failed','cancelled')",
+                                    (job_id,)).rowcount > 0
+        finally:
+            conn.close()
+
     def retry(self, job_id: int) -> bool:
         conn = self.db(write=True)
         try:
@@ -312,8 +322,10 @@ class Dashboard:
                 cells += [f"<span class='muted'>{when(j['enqueued_at'])}</span>", str(j["attempts"]),
                           f"<span class='bad'>{esc((j['last_error'] or '')[:200])}</span>"]
             if actions:
-                cells.append(f"<form method='post' action='/retry/{j['id']}'><button class='btn small'>Retry</button>"
-                             f"</form>" if j["state"] in ("failed", "cancelled") else "")
+                cells.append(f"<div style='display:flex;gap:4px'><form method='post' action='/retry/{j['id']}'>"
+                             f"<button class='btn small'>Retry</button></form><form method='post' "
+                             f"action='/remove/{j['id']}'><button class='btn small'>Remove</button></form></div>"
+                             if j["state"] in ("failed", "cancelled") else "")
             out.append(cells)
         return table(headers, out)
 
@@ -1208,6 +1220,9 @@ def make_handler(dash: Dashboard):
                 self._send(200, dash.hardware(dash.check_hardware()))
             elif path == "/system/tasks/scan":
                 self._send(200, dash.tasks(dash.run_scan()))
+            elif len(parts) == 2 and parts[0] == "remove" and parts[1].isdigit():
+                dash.remove(int(parts[1]))
+                self._redirect("/errors")
             elif len(parts) == 2 and parts[0] == "retry" and parts[1].isdigit():
                 dash.retry(int(parts[1]))
                 self._redirect("/queue")
