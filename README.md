@@ -42,6 +42,21 @@ are expected to work where their capability check passes, but haven't been valid
 
 Not validated yet: NVIDIA (NVENC), AMD (VAAPI, AMF), Intel before Arc, Dolby Vision profile 5 sources.
 
+## Windows
+
+Not tested yet. What to expect:
+
+| Setup | Status |
+|---|---|
+| Docker Desktop (WSL2), CPU encoding | Expected to work (the same Linux image); slow at 4K |
+| Docker Desktop, NVIDIA GPU (`--gpus all`) | Expected to work through NVENC (untested) |
+| Docker Desktop, Intel or AMD GPU | Not available: Windows doesn't expose `/dev/dri` to containers, so conversions use the CPU |
+| Native Windows (no Docker) | Not supported: the service uses Unix-only modules and VAAPI-based pipelines |
+
+With Docker Desktop, give the container the library folders and set each Sonarr/Radarr instance's remote root to
+the path as Sonarr/Radarr see it (for example `D:\Media\TV`) and the local root to the path inside the container.
+`AGENTS.md` lists what an agent should do to add or validate Windows support.
+
 ## Validate your GPU
 
 ```sh

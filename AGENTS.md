@@ -179,6 +179,35 @@ This project is meant to run on any GPU with hardware encoding, but only some ha
 Never commit media files, sample paths, hostnames, API keys or local configuration (`*.toml` other than the example,
 `AGENTS.local.md`, databases are ignored by git for that reason).
 
+## Implementing Windows support (for agents)
+
+Status: untested. Docker Desktop runs the Linux image (CPU encoding; NVIDIA through `--gpus all`); Intel/AMD GPUs are
+not reachable from containers on Windows (no `/dev/dri`); native Windows isn't supported. Work in this order, each
+step validated before the next, and keep Linux behaviour unchanged (all tests, including the QSV snapshot):
+
+1. **Docker Desktop, CPU and NVIDIA:** run the unit tests and `validate` in the container on Windows (NVIDIA:
+   `--gpus all` with the NVIDIA driver's WSL support). Fix what fails in `encoders.py` (NVENC pipeline: CUDA decode,
+   `scale_cuda`, `-cq`; HDR10 static metadata on the frames is the part most likely to need work). Check the
+   path mapping with Windows paths on the Sonarr/Radarr side (`translate_remote_path`, `remote_root` like
+   `D:\Media\TV`: backslashes and drive letters). Add a README table row marked "Windows (Docker Desktop)".
+2. **Intel/AMD under WSL2 (optional, experimental):** Mesa's `d3d12` VA-API driver exposes the GPU's encoders through
+   `/dev/dxg`. It needs that driver in the image (the bundled Jellyfin ffmpeg ships iHD/i965/radeonsi only), the
+   device passed in, and a backend or render-device handling for `/dev/dxg` in `encoders.py`/`gpus.py` (no PCI sysfs
+   there). Prove it with `validate` before enabling it by default.
+3. **Native Windows (no Docker), a larger port:**
+   - Portable process and GPU locks (`fcntl.flock` in `media_converterr.py`/`media_convert_5.py`: e.g. `msvcrt.locking`
+     behind a small helper); `pwd`/`grp` and the systemd commands only on Linux; signals that exist on Windows.
+   - Windows encoder pipelines: QSV through D3D11 (`-init_hw_device d3d11va=dx -init_hw_device qsv=qs@dx`,
+     `-hwaccel d3d11va`/`qsv`, `scale_qsv`/`vpp_qsv`), AMF with D3D11 decode, NVENC unchanged (CUDA exists on
+     Windows); libplacebo on Vulkan works on Windows for renders. A new backend class each, chosen by
+     `encoders.plan` from the capability check (which already proves what works).
+   - Tools on Windows: ffmpeg with those encoders, `hdr10plus_tool`, `dovi_tool`, MKVToolNix, Tesseract (PATH or
+     configured locations); paths and temporary files via `os.path`/`tempfile` (no hard-coded `/tmp`, `/data`).
+   - A way to run it as a service (for example a scheduled task or NSSM) documented in the README.
+   - Unit tests that cover the Windows command shapes without needing Windows; `validate` on real Windows hardware.
+4. **Open a pull request per step** (`.github/PULL_REQUEST_TEMPLATE.md`), with the validation summary and the
+   Windows version, GPU driver and ffmpeg build.
+
 ## Known issues / open items
 
 - **Dolby Vision → HDR10+ not implemented:** DV output choices are HDR10 from the base layer (keeping HDR10+ when the
