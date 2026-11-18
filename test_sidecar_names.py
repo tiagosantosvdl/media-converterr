@@ -193,3 +193,12 @@ class JellyfinConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TaggedLanguageTests(unittest.TestCase):
+    def test_sonarr_mangled_brazilian_names_keep_their_label(self):
+        self.assertEqual(sn.tagged_language(".BR.pt"), "pt-BR")
+        self.assertEqual(sn.tagged_language(".BR.pt.hi"), "pt-BR")
+        self.assertEqual(sn.repaired_suffix(".BR.pt.hi", "pt-BR"), ".pt-BR.hi")
+        self.assertIsNone(sn.tagged_language(".hi"))
+        self.assertIsNone(sn.tagged_language(".1.pt"))

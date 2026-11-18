@@ -2454,7 +2454,7 @@ def repair_sidecars(video_path: str, settings: Settings, logger: logging.Logger,
                 text = handle.read()
         except OSError:
             continue
-        language = sidecar_names.detect_language(text)
+        language = sidecar_names.tagged_language(suffix) or sidecar_names.detect_language(text)
         if not language:
             counts["unclear"] += 1
             logger.warning("Sidecar %s: language unclear, name left as is", source)

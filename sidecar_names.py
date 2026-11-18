@@ -82,6 +82,14 @@ def mangled_sidecars(video_path: str, names: Iterable[str]) -> list[tuple[str, s
     return found
 
 
+def tagged_language(suffix: str) -> Optional[str]:
+    """A language the mangled name still states, to restore instead of guessing from the text. Sonarr and Radarr
+    turn `.pt-BR.srt` into `.BR.pt.srt` (they know only two-letter codes): a name with both `pt` and `br` was
+    Brazilian Portuguese. Relabelling a subtitle whose text is another variant is not the repair's job."""
+    tokens = {t.lower() for t in suffix.split(".") if t}
+    return "pt-BR" if {"pt", "br"} <= tokens or "pt-br" in tokens else None
+
+
 def repaired_suffix(suffix: str, language: str) -> str:
     """The proper suffix (without `.srt`) for a mangled one, given the language of its text."""
     tokens = {t.lower() for t in suffix.split(".") if t}
