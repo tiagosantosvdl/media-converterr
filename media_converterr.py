@@ -2696,12 +2696,36 @@ def extract_subtitles_pass(conn: sqlite3.Connection, settings: Settings, logger:
     return counts
 
 
+PROGRESS_FILE = "progress.txt"   # ffmpeg -progress output of the running encode or remux (in the work dir)
+PROGRESS_META = "progress.json"  # which file it is and how long it plays, for the web interface
+
+
+def with_progress(command: list[str], input_path: str, settings: Settings, kind: str) -> list[str]:
+    """The ffmpeg command with -progress reporting into the work dir, and the note the web interface reads beside
+    it (source path, playing time, what is running). Real progress: encoded position over the source's duration."""
+    try:
+        duration = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of",
+                                         "csv=p=0", input_path], capture_output=True, text=True).stdout.strip())
+    except ValueError:
+        duration = 0.0
+    progress = os.path.join(settings.work_dir, PROGRESS_FILE)
+    with contextlib.suppress(OSError):
+        os.remove(progress)
+    try:
+        with open(os.path.join(settings.work_dir, PROGRESS_META), "w", encoding="utf-8") as handle:
+            json.dump({"path": input_path, "duration": duration, "kind": kind, "started": time.time()}, handle)
+    except OSError:
+        return command
+    return [command[0], "-progress", progress, "-stats_period", "5", *command[1:]]
+
+
 def encode_video(input_path: str, temp_path: str, video_info: Any, mode: str, extra_args: Sequence[str],
                  settings: Settings, logger: logging.Logger) -> None:
     """The encode itself: hardware first, software decode/filter fallback, then HDR10+ injection for HEVC outputs.
     Raises on failure; validation and installation are the caller's."""
     legacy = get_legacy_converter()
-    command = legacy.build_cmd(input_path, temp_path, False, video_info) + list(extra_args)
+    command = with_progress(legacy.build_cmd(input_path, temp_path, False, video_info) + list(extra_args),
+                            input_path, settings, "encode")
     logger.warning("Encoding start: %s", input_path)
     logger.info("Encoding cmd: %s (cwd=%s)", legacy.command_text(command), settings.work_dir)
     return_code, command_log = legacy.run(command, settings.work_dir, logger)
@@ -2710,7 +2734,8 @@ def encode_video(input_path: str, temp_path: str, video_info: Any, mode: str, ex
         raise WorkerStopping()
     if return_code != 0:
         logger.warning("Encoding failed. Retrying with software decode/filter fallback.")
-        command = legacy.build_cmd(input_path, temp_path, True, video_info) + list(extra_args)
+        command = with_progress(legacy.build_cmd(input_path, temp_path, True, video_info) + list(extra_args),
+                                input_path, settings, "encode")
         logger.warning("Encoding start: %s", input_path)
         logger.info(
             "Encoding cmd: %s (cwd=%s)", legacy.command_text(command), settings.work_dir
@@ -2829,7 +2854,8 @@ def process_conversion_job(
         # a manual Re-encode (forced job) always encodes; the remux rule only governs automatic jobs
         remux = None if forced else legacy.remux_decision(video_info, mode, input_path)
         if remux:
-            command = legacy.build_remux_cmd(input_path, temp_path, video_info, mode) + subtitle_args
+            command = with_progress(legacy.build_remux_cmd(input_path, temp_path, video_info, mode) + subtitle_args,
+                                    input_path, settings, "remux")
             logger.warning("Remux start (no re-encode: %s): %s", remux, input_path)
             logger.info("Remux cmd: %s (cwd=%s)", legacy.command_text(command), settings.work_dir)
             return_code, command_log = legacy.run(command, settings.work_dir, logger)

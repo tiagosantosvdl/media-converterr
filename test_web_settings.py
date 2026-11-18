@@ -277,6 +277,18 @@ class ServerTests(unittest.TestCase):
         self.assertIn("http://conv:8090/hook/sonarr?token=", page)
         self.assertNotIn("filekey", page)  # keys are never shown
 
+    def test_real_progress(self):
+        import web as web_module
+        work = self.tmp.name
+        self.assertIsNone(web_module.read_progress(work))
+        with open(os.path.join(work, mc.PROGRESS_META), "w") as f:
+            json.dump({"path": "/m/a.mkv", "duration": 1000.0, "kind": "encode"}, f)
+        with open(os.path.join(work, mc.PROGRESS_FILE), "w") as f:
+            f.write("frame=10\nout_time_us=100000000\nspeed=2.00x\nprogress=continue\n"
+                    "frame=20\nout_time_us=250000000\nspeed=1.50x\nprogress=continue\n")
+        p = web_module.read_progress(work)
+        self.assertEqual((p["path"], round(p["pct"]), p["speed"], round(p["left"])), ("/m/a.mkv", 25, 1.5, 500))
+
     def test_cross_site_posts_are_refused(self):
         self.request("/setup", {"skip": "1"})
         def post(headers):

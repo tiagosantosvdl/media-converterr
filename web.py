@@ -69,6 +69,37 @@ def first(form: dict, key: str) -> str:
     return form.get(key, [""])[0].strip()
 
 
+def read_progress(work_dir: str) -> dict | None:
+    """The running encode's real progress from ffmpeg's -progress file: {path, kind, pct, speed, left} or None."""
+    try:
+        with open(os.path.join(work_dir, mc.PROGRESS_META), encoding="utf-8") as handle:
+            meta = json.load(handle)
+        with open(os.path.join(work_dir, mc.PROGRESS_FILE), "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - 4096))
+            text = handle.read().decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return None
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        key, _, value = line.partition("=")
+        values[key.strip()] = value.strip()
+    try:
+        position = int(values.get("out_time_us") or values.get("out_time_ms") or 0) / 1e6
+    except ValueError:
+        position = 0.0
+    duration = float(meta.get("duration") or 0)
+    if not duration or position <= 0:
+        return {"path": meta.get("path"), "kind": meta.get("kind"), "pct": 0.0, "speed": None, "left": None}
+    try:
+        speed = float(values.get("speed", "").rstrip("x"))
+    except ValueError:
+        speed = None
+    left = (duration - position) / speed if speed else None
+    return {"path": meta.get("path"), "kind": meta.get("kind"), "pct": min(100.0, 100 * position / duration),
+            "speed": speed, "left": left}
+
+
 STATE_LABELS = {"running": "info", "queued": "", "retry_wait": "warn", "failed": "bad", "cancelled": "",
                 "done": "ok"}
 
@@ -118,17 +149,23 @@ class Dashboard:
                              "available_at LIMIT 500").fetchall()
             avg = c.execute("SELECT AVG(finished_at-started_at) FROM (SELECT * FROM jobs WHERE state='done' AND "
                             "started_at IS NOT NULL ORDER BY finished_at DESC LIMIT 20)").fetchone()[0]
+        progress = read_progress(self.settings.work_dir)
         icons = {"running": ("info", "Converting"), "queued": ("clock", "Queued"), "retry_wait": ("warning", "Waiting "
                  "to retry"), "failed": ("error", "Failed"), "cancelled": ("clock", "Cancelled")}
         out = []
         waiting = 0
         for j in list(running) + list(rows):
             kind, title = icons.get(j["state"], ("clock", j["state"]))
-            if j["state"] == "running":
+            if j["state"] == "running" and progress and progress["path"] == j["path"]:
+                pct = progress["pct"]
+                speed = f" · {progress['speed']:.2f}×" if progress["speed"] else ""
+                bar = ui.progress(pct, f"{pct:.0f}%{speed}")
+                left = dur(progress["left"]) if progress["left"] is not None else "–"
+            elif j["state"] == "running":  # no progress file (an older converter, or not started yet): a guess
                 elapsed = time.time() - (j["started_at"] or time.time())
                 pct = min(99, 100 * elapsed / avg) if avg else None
-                bar = ui.progress(pct, f"{pct:.0f}%" if pct is not None else "")
-                left = dur(max(0, avg - elapsed)) if avg else "–"
+                bar = ui.progress(pct, f"~{pct:.0f}% (guess)" if pct is not None else "")
+                left = "–"
             else:
                 waiting += j["state"] in ("queued", "retry_wait")
                 bar, left = ui.progress(0 if j["state"] in ("queued", "retry_wait") else None, ""), "–"
