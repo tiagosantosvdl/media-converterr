@@ -1,0 +1,26 @@
+# Example deployment. Replace every /path/to/..., the user/group ids and the hostnames with your own.
+# Build first:  docker build -t media-converterr:latest .
+services:
+  media-converterr:
+    image: media-converterr:latest
+    restart: unless-stopped
+    user: "1000:1000"             # owner of the media library (it replaces files in place)
+    group_add:
+      - "render"                  # or the numeric gid of the host's render group
+    devices:
+      - /dev/dri/renderD128       # Intel GPU (QSV/VAAPI); the encode commands use this node
+    environment:
+      MEDIA_CONVERT_AUDIO_LANGUAGES: "en,eng"       # comma-separated; empty keeps every language
+      MEDIA_CONVERT_SUBTITLE_LANGUAGES: "en,eng"
+      SCAN_INTERVAL_HOURS: "168"                    # full library scan at start and then weekly
+      WEB_PORT: "8090"                              # web interface and the webhook Sonarr/Radarr call
+    ports:
+      - "8090:8090"                                 # or put Sonarr/Radarr and this service on one Docker network
+    volumes:
+      - /path/to/media-converterr/config:/config:ro # media_converterr.toml (see media_converterr.example.toml)
+      - /path/to/media-converterr/data:/data        # databases, temporary encodes, logs
+      - /path/to/hook-spool:/hooks                  # only for the Custom Script route; webhooks need no shared folder
+      - /path/to/sonarr/config.xml:/arr/sonarr/config.xml:ro
+      - /path/to/radarr/config.xml:/arr/radarr/config.xml:ro
+      - /path/to/series:/media/series               # read-write: converted files replace the originals
+      - /path/to/movies:/media/movies

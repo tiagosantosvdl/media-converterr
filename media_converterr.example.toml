@@ -1,0 +1,46 @@
+# Example configuration for media_converterr.py. Copy to your config path (default /config/media_converterr.toml),
+# replace the placeholders, and keep the real file private: it holds API keys.
+
+[media_converterr]
+database = "/data/media_converterr.db"
+source_database = "/data/media_convert.db"     # optional: database of the standalone converter, imported once by `init`
+work_dir = "/data"                              # temporary encodes are written here
+lock = "/data/media_convert.lock"
+log_dir = "/data/logs"
+exclude = ["#recycle", "@eaDir"]
+convertible_extensions = ["rmvb", "mkv", "avi", "mov", "wmv", "m4v", "mp4"]
+unlinked_folders = []                           # folders scanned even though no *arr manages them
+poll_seconds = 5
+settle_seconds = 10                             # wait for a file to stop changing before converting
+callback_delay_seconds = 30
+retry_base_seconds = 300
+retry_max_seconds = 3600
+max_conversion_attempts = 3
+api_timeout_seconds = 15
+hook_spool_dir = "/hooks"                       # where the *arr hook script drops events
+
+[[instances]]
+name = "sonarr"
+type = "sonarr"
+url = "http://sonarr:8989"
+api_key_file = "/arr/sonarr/config.xml"         # read <ApiKey> from Sonarr's config (mounted read-only), or set api_key = "..."
+remote_root = "/tv"                             # the library path as Sonarr sees it
+local_root = "/media/series"                    # the same folder as this converter sees it
+
+[[instances]]
+name = "radarr"
+type = "radarr"
+url = "http://radarr:7878"
+api_key_file = "/arr/radarr/config.xml"
+remote_root = "/movies"
+local_root = "/media/movies"
+
+# Optional: after repairing subtitle names that a Sonarr/Radarr rename mangled, tell Jellyfin so it rescans those
+# items at once. The key comes from the environment (api_key_env) or api_key = "...".
+[jellyfin]
+url = "http://jellyfin:8096"
+api_key_env = "JELLYFIN_API_KEY"
+paths = [
+  { local = "/media/series", remote = "/series" },   # local root -> the same folder as Jellyfin sees it
+  { local = "/media/movies", remote = "/movies" },
+]

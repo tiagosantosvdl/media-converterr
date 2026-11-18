@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+
+# Local, installation-specific files
+AGENTS.local.md
+/local/
+*.toml
+!media_converterr.example.toml
+*.db
