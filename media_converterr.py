@@ -528,6 +528,14 @@ CREATE TABLE IF NOT EXISTS callbacks (
 );
 CREATE INDEX IF NOT EXISTS callbacks_claim
     ON callbacks(state, available_at, updated_at);
+CREATE TABLE IF NOT EXISTS sidecar_inventory (
+    folder TEXT NOT NULL,
+    sha1 TEXT NOT NULL,
+    suffix TEXT NOT NULL,
+    video TEXT,
+    updated_at REAL,
+    PRIMARY KEY(folder, sha1)
+);
 """
 
 
@@ -1790,6 +1798,8 @@ def scan_libraries(
     }
     logger.info("Candidates found: %d", len(paths))
     for path in paths:
+        if not dry_run:
+            record_sidecar_inventory(settings.database_path, path)
         try:
             signature = SourceSignature.from_path(path)
             row = get_file_row(conn, path)
@@ -2112,6 +2122,7 @@ def install_subtitles(output_path: str, temps: dict[str, str], settings: Setting
             shutil.copyfile(temp, dest + ".tmp")
             os.replace(dest + ".tmp", dest)
             installed += 1
+            record_sidecar_inventory(settings.database_path, output_path)
         except OSError as error:
             logger.warning("Could not install subtitle %s for %s: %s", suffix, output_path, error)
         finally:
@@ -2434,6 +2445,64 @@ def fold_forced_sidecars(settings: Settings, logger: logging.Logger, dry_run: bo
     return counts
 
 
+def _sha1(path: str) -> Optional[str]:
+    import hashlib
+    try:
+        with open(path, "rb") as handle:
+            return hashlib.sha1(handle.read()).hexdigest()
+    except OSError:
+        return None
+
+
+def record_sidecar_inventory(database_path: str, video_path: str) -> int:
+    """Remember the properly named subtitle files of a video by content (folder, SHA-1 -> suffix), so a rename that
+    mangles their names (Sonarr/Radarr drop `pt-BR` entirely: `.pt-BR.hi.srt` becomes `.hi.srt`) can be undone
+    exactly. Refreshed by every scan and after subtitles are installed or repaired. Returns the files recorded."""
+    import sidecar_names
+    folder, stem = os.path.split(os.path.splitext(video_path)[0])
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return 0
+    rows = []
+    for name in names:
+        if not name.startswith(stem + ".") or not name.lower().endswith(".srt"):
+            continue
+        suffix = name[len(stem):-4]
+        if not sidecar_names.is_valid_suffix(suffix):
+            continue
+        digest = _sha1(os.path.join(folder, name))
+        if digest:
+            rows.append((folder, digest, suffix, stem, time.time()))
+    if not rows:
+        return 0
+    try:
+        conn = sqlite3.connect(database_path, timeout=30)
+        with conn:
+            conn.executemany("INSERT INTO sidecar_inventory(folder, sha1, suffix, video, updated_at) VALUES(?,?,?,?,?) "
+                             "ON CONFLICT(folder, sha1) DO UPDATE SET suffix=excluded.suffix, video=excluded.video, "
+                             "updated_at=excluded.updated_at", rows)
+        conn.close()
+    except sqlite3.Error:
+        return 0
+    return len(rows)
+
+
+def remembered_suffix(database_path: str, path: str) -> Optional[str]:
+    """The suffix this subtitle file (by content) had when last seen properly named in its folder."""
+    digest = _sha1(path)
+    if not digest or not os.path.isfile(database_path):
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True, timeout=30)
+        row = conn.execute("SELECT suffix FROM sidecar_inventory WHERE folder=? AND sha1=?",
+                           (os.path.dirname(path), digest)).fetchone()
+        conn.close()
+    except sqlite3.Error:
+        return None
+    return row[0] if row else None
+
+
 def repair_sidecars(video_path: str, settings: Settings, logger: logging.Logger, dry_run: bool = False) -> dict[str, int]:
     """Put back the sidecar names a Sonarr/Radarr rename mangled (`sidecar_names`): the language from the text, the
     hearing-impaired and forced flags from the surviving tags. A mangled file whose proper name is taken by a file
@@ -2455,12 +2524,14 @@ def repair_sidecars(video_path: str, settings: Settings, logger: logging.Logger,
                 text = handle.read()
         except OSError:
             continue
-        language = sidecar_names.tagged_language(suffix) or sidecar_names.detect_language(text)
-        if not language:
+        remembered = remembered_suffix(settings.database_path, source)
+        language = None if remembered else (sidecar_names.tagged_language(suffix)
+                                            or sidecar_names.detect_language(text))
+        if not remembered and not language:
             counts["unclear"] += 1
             logger.warning("Sidecar %s: language unclear, name left as is", source)
             continue
-        target = os.path.splitext(video_path)[0] + sidecar_names.repaired_suffix(suffix, language) + ".srt"
+        target = os.path.splitext(video_path)[0] + (remembered or sidecar_names.repaired_suffix(suffix, language)) + ".srt"
         if target in planned or os.path.exists(target):
             if target in planned:
                 same = sidecar_names.same_lines(planned[target], text)
@@ -2482,6 +2553,7 @@ def repair_sidecars(video_path: str, settings: Settings, logger: logging.Logger,
         planned[target] = text
         if not dry_run:
             os.rename(source, target)
+            record_sidecar_inventory(settings.database_path, video_path)
         logger.info("Sidecar %s %s %s", source, "would be renamed to" if dry_run else "renamed to", os.path.basename(target))
     return counts
 

@@ -94,6 +94,23 @@ class RepairTests(unittest.TestCase):
         self.assertIn("Show - S01E02 EAC3.pt-BR.srt", names)
         self.assertNotIn("Show - S01E02 EAC3.BR.pt.srt", names)
 
+    def test_inventory_restores_names_the_rename_dropped(self):
+        # Sonarr dropped pt-BR entirely: .pt-BR.hi.srt became .hi.srt; the text alone can't tell pt from pt-BR
+        os.makedirs(os.path.dirname(self.settings.database_path))
+        mc.connect_database(self.settings.database_path).close()
+        video = os.path.join(self.lib, "Other - S01E01.mkv")
+        open(video, "w").close()
+        with open(os.path.join(self.lib, "Other - S01E01.pt-BR.hi.srt"), "w") as f:
+            f.write(PT_BR + "\n")
+        self.assertEqual(mc.record_sidecar_inventory(self.settings.database_path, video), 1)
+        renamed = os.path.join(self.lib, "Other - S01E01 New.mkv")
+        os.rename(video, renamed)
+        os.rename(os.path.join(self.lib, "Other - S01E01.pt-BR.hi.srt"), os.path.join(self.lib, "Other - S01E01 New.hi.srt"))
+        with patch.object(sn, "detect_language", return_value="pt"):  # the text alone would say European
+            counts = mc.repair_sidecars(renamed, self.settings, logging.getLogger("t"))
+        self.assertEqual(counts["renamed"], 1)
+        self.assertTrue(os.path.exists(os.path.join(self.lib, "Other - S01E01 New.pt-BR.hi.srt")))
+
     def test_numbered_copy_with_other_timing_is_a_duplicate(self):
         with open(os.path.join(self.lib, "Show - S01E01 EAC3.1.nl.srt"), "w") as f:
             f.write(NL.replace(",000 -->", ",080 -->"))
