@@ -127,7 +127,7 @@ class BackendTests(unittest.TestCase):
         f = fixtures()
         hdr10plus, dv8 = f["hdr10plus"], f["dv8"]
         m.apply_conversion_settings({})
-        self.assertEqual(m.output_spec(dv8, m.HDR10_PQ), m.OutputSpec("hdr10", "hevc", False, m.HDR10_PQ))
+        self.assertEqual(m.output_spec(dv8, m.HDR10_PQ), m.OutputSpec("dv81", "hevc", False, "dovi-8.1"))  # default
         self.assertEqual(m.output_spec(hdr10plus, m.HDR10_PQ).target, "hdr10plus")
         m.apply_conversion_settings({"hdr_codec": "av1", "output_dv": "dv81"})
         self.assertEqual(m.output_spec(f["hdr10"], m.HDR10_PQ).codec, "av1")  # HDR10 on AV1

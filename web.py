@@ -876,8 +876,9 @@ class Dashboard:
                     c["output_hdr10"]), "HDR10+ needs HEVC."),
                 g("HLG sources", ui.select("output_hlg", [("hlg", "HLG"), ("sdr", "SDR")], c["output_hlg"])),
                 g("Dolby Vision sources (profiles 7, 8)", ui.select("output_dv", [
+                    ("dv81", "Dolby Vision profile 8.1 (keeping HDR10+ too)"),
                     ("hdr10plus", "HDR10 from the base layer, keeping HDR10+"), ("hdr10", "HDR10 from the base layer"),
-                    ("dv81", "Dolby Vision profile 8.1"), ("sdr", "SDR")], c["output_dv"]),
+                    ("sdr", "SDR")], c["output_dv"]),
                   "Dolby Vision 8.1 keeps the source's Dolby Vision metadata (dovi_tool), needs HEVC and an unscaled "
                   "picture; players without Dolby Vision show its HDR10 base. Profile 7's enhancement layer is "
                   "dropped either way."),

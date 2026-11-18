@@ -122,8 +122,9 @@ Still open: a calibration tool and a common quality scale (one level mapped to p
     its check failed. Without a stored check: QSV on the default device (the pre-backend behaviour).
 - **Dynamic range and codecs (`output_spec`):** each source is classed SDR, HDR10/HDR10+, HLG, Dolby Vision 7/8 or
   Dolby Vision 5, and the settings choose its output: HDR10 (with HDR10+ when present) or HDR10 only or SDR; HLG or
-  SDR; for DV 7/8 HDR10 from the base layer (with or without HDR10+), Dolby Vision 8.1 or SDR; for DV 5 HDR10
-  (rendered) or SDR. SDR codec AV1, HEVC or H.264; HDR codec HEVC or AV1 (HDR10+ and DV force HEVC). Verified on
+  SDR; for DV 7/8 Dolby Vision 8.1 (with HDR10+ when present), HDR10 from the base layer (with or without HDR10+) or
+  SDR; for DV 5 HDR10 (rendered) or SDR. **Defaults keep the source's HDR format** (user decision: HEVC was chosen
+  for HDR so dynamic metadata survives); DV 5 is the exception (its base layer isn't HDR10, so it is rendered). SDR codec AV1, HEVC or H.264; HDR codec HEVC or AV1 (HDR10+ and DV force HEVC). Verified on
   Intel Arc with real 8 s clips: HDR10 in AV1 (QSV and SVT-AV1) keeps PQ/BT.2020 and the mastering-display and
   light-level metadata; DV 8.1 (`inject_dovi`: `dovi_tool -m 2 extract-rpu` from the piped source stream,
   `inject-rpu`, mkvmerge, then checks: same frames, same timestamps, profile 8 read back) on a DV 8 Blu-ray clip;

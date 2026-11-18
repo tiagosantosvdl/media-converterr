@@ -9,9 +9,9 @@ a durable queue, a weekly reconciliation scan and a web interface in the style o
   Sonarr/Radarr itself (or a Custom Script hook), and re-scans the libraries on a schedule to catch anything missed.
 - **Re-encodes to a common quality standard on the GPU,** proving at start-up which encoders work on this machine:
   Intel QSV, VAAPI (Intel, AMD), NVIDIA NVENC, AMD AMF, or the CPU (SVT-AV1, x265, x264). By default SDR becomes AV1
-  and HDR becomes 10-bit HEVC with its static HDR metadata on every frame and HDR10+ copied from the source
-  (`hdr10plus_tool`); each kind of source can instead become HDR10 in AV1, Dolby Vision profile 8.1 (`dovi_tool`), or
-  SDR tone mapped with libplacebo. When the GPU lacks a codec, another codec on the GPU (HEVC, H.264) or the CPU.
+  and HDR keeps the source's format in 10-bit HEVC: HDR10 with its static metadata on every frame, HDR10+ copied from
+  the source (`hdr10plus_tool`), HLG, and Dolby Vision as profile 8.1 (`dovi_tool`; profile 5 is rendered to HDR10).
+  Each kind of source can instead become HDR10 only, HDR10 in AV1, or SDR tone mapped with libplacebo. When the GPU lacks a codec, another codec on the GPU (HEVC, H.264) or the CPU.
 - **Keeps efficient sources as they are:** HEVC/AV1 sources at or below a bitrate per megapixel of picture (black
   bars excluded) are remuxed, not re-encoded. Dolby Vision is never kept as it is.
 - **Keeps only the streams you want:** audio and subtitles in the configured languages (plus the original-language

@@ -109,7 +109,7 @@ CODEC_FALLBACK = "gpu"
 # become. "hdr10plus": HDR10, with HDR10+ when the source has it; "dv81": Dolby Vision profile 8.1; "sdr": tone mapped.
 OUTPUT_HDR10 = "hdr10plus"
 OUTPUT_HLG = "hlg"
-OUTPUT_DV = "hdr10plus"
+OUTPUT_DV = "dv81"  # default: every source keeps its HDR format (user decision)
 OUTPUT_DV5 = "hdr10"
 # Tone mapping to SDR: "quality" (libplacebo on Vulkan: keeps shadow detail; about 0.2x real time at 4K on Intel Arc)
 # or "fast" (the GPU's video-processing tone mapping, Intel/AMD via VAAPI: about 4x real time, crushes dark scenes).
@@ -120,7 +120,7 @@ TONEMAP = "quality"
 SUBTITLE_MODE = "extract"
 BITMAP_SUBTITLES = "ocr"
 OUTPUT_CHOICES = {"output_hdr10": ("hdr10plus", "hdr10", "sdr"), "output_hlg": ("hlg", "sdr"),
-                  "output_dv": ("hdr10plus", "hdr10", "dv81", "sdr"), "output_dv5": ("hdr10", "sdr")}
+                  "output_dv": ("dv81", "hdr10plus", "hdr10", "sdr"), "output_dv5": ("hdr10", "sdr")}
 # Encoder backend ("auto", "qsv", "software"; see encoders.py) and the stored capability check that "auto" uses.
 BACKEND = "auto"
 CAPABILITIES: Optional[dict] = None
@@ -140,7 +140,7 @@ LANGUAGE_CODE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})?$")
 def conversion_defaults() -> dict:
     """Built-in conversion policy (languages from the environment or media_convert.local.toml)."""
     return {"backend": "auto", "sdr_codec": "av1", "hdr_codec": "hevc", "codec_fallback": "gpu",
-            "output_hdr10": "hdr10plus", "output_hlg": "hlg", "output_dv": "hdr10plus", "output_dv5": "hdr10",
+            "output_hdr10": "hdr10plus", "output_hlg": "hlg", "output_dv": "dv81", "output_dv5": "hdr10",
             "tonemap": "quality", "subtitle_mode": "extract", "bitmap_subtitles": "ocr",
             "av1_quality": 20, "hevc_quality": 16, "h264_quality": 21, "software_av1_crf": 25,
             "software_hevc_crf": 18, "software_h264_crf": 19, "preset": "slow", "max_height": 2160,
