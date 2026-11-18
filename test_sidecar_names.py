@@ -81,6 +81,19 @@ class RepairTests(unittest.TestCase):
         (moved,) = os.listdir(stash)  # one of the two Portuguese copies; the other took the name
         self.assertEqual(open(os.path.join(stash, moved)).read(), PT_BR)
 
+    def test_rename_event_repairs_the_whole_folder(self):
+        # Sonarr rewrote the extra files of an episode whose video kept its name; its event lists only renamed videos
+        other = os.path.join(self.lib, "Show - S01E02 EAC3.mkv")
+        open(other, "w").close()
+        for suffix, text in ((".hi", EN_HI), (".BR.pt", PT_BR)):
+            with open(os.path.join(self.lib, f"Show - S01E02 EAC3{suffix}.srt"), "w") as f:
+                f.write(text)
+        mc.repair_after_rename([(self.video, None)], self.settings, logging.getLogger("t"), self.lib)
+        names = os.listdir(self.lib)
+        self.assertIn("Show - S01E02 EAC3.en.hi.srt", names)
+        self.assertIn("Show - S01E02 EAC3.pt-BR.srt", names)
+        self.assertNotIn("Show - S01E02 EAC3.BR.pt.srt", names)
+
     def test_numbered_copy_with_other_timing_is_a_duplicate(self):
         with open(os.path.join(self.lib, "Show - S01E01 EAC3.1.nl.srt"), "w") as f:
             f.write(NL.replace(",000 -->", ",080 -->"))

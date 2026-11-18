@@ -1606,7 +1606,8 @@ def process_hook_event(
         pairs = [(translate_remote_path(p, instance),
                   translate_remote_path(previous[i], instance) if i < len(previous) else None)
                  for i, p in enumerate(current)]
-        repair_after_rename(pairs, settings, logger)
+        folder = translate_remote_path(entity_path, instance) if entity_path else None
+        repair_after_rename(pairs, settings, logger, folder)
     logger.info("Processed %s %s event paths=%d", instance.name, event_type, len(current))
 
 
@@ -2555,11 +2556,22 @@ def follow_rename(path: str, previous: Optional[str], settings: Settings, logger
     return moved
 
 
-def repair_after_rename(pairs: Sequence[tuple[str, Optional[str]]], settings: Settings, logger: logging.Logger) -> None:
+def repair_after_rename(pairs: Sequence[tuple[str, Optional[str]]], settings: Settings, logger: logging.Logger,
+                        folder: Optional[str] = None) -> None:
     """Rename hook: bring along sidecars left under the previous name, repair the renamed videos' sidecar names, then
-    let Jellyfin rescan the ones that changed. Never fails the hook event."""
+    let Jellyfin rescan the ones that changed. With `folder` (the series or movie folder), the sidecars of every
+    other video there are repaired too: Sonarr rewrites the extra files of the whole series on a rename, mangling
+    those of episodes whose video kept its name, while its event lists only the renamed videos (seen live). Never
+    fails the hook event."""
     changed = []
-    for path, previous in pairs:
+    others = []
+    if folder and os.path.isdir(folder):
+        named = {path for path, _ in pairs}
+        for root, _, files in os.walk(folder):
+            others += [(os.path.join(root, f), None) for f in files
+                       if os.path.splitext(f)[1].lower().lstrip(".") in sidecar_names_video_extensions()
+                       and not f.startswith(".") and os.path.join(root, f) not in named]
+    for path, previous in [*pairs, *others]:
         try:
             followed = follow_rename(path, previous, settings, logger)
             counts = repair_sidecars(path, settings, logger)
@@ -2569,6 +2581,11 @@ def repair_after_rename(pairs: Sequence[tuple[str, Optional[str]]], settings: Se
         if followed or counts["renamed"] or counts["duplicate"]:
             changed.append(path)
     jellyfin_media_updated(settings, changed, logger)
+
+
+def sidecar_names_video_extensions() -> set[str]:
+    import sidecar_names
+    return {e.lower().lstrip(".") for e in sidecar_names.VIDEO_EXTENSIONS}
 
 
 def repair_sidecars_pass(settings: Settings, logger: logging.Logger, paths: Sequence[str],
