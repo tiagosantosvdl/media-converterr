@@ -133,6 +133,21 @@ Still open: a calibration tool and a common quality scale (one level mapped to p
   frames uploaded to a separately opened Vulkan device; a Vulkan device derived from VAAPI made uploads about 7×
   slower), Fast about 4×. Tone mapping never remuxes. Output tags/notes record the codec and the output mode
   (`sdr`, `dovi-8.1`, or the source mode). H.264 is an output too (SDR, 8-bit), and part of the GPU fallback.
+- **Picture settings:** `KEYFRAME_SECONDS` (default 2: `-g` = seconds × 60 and forced keyframes every N s; the
+  default reproduces the earlier commands), `LOOKAHEAD` (default 100: QSV `look_ahead_depth`, NVENC `rc-lookahead`
+  up to 32, x265 `rc-lookahead`, SVT-AV1 `lookahead` up to 120, x264 `rc-lookahead`), `DEINTERLACE` (default on: a
+  source whose `field_order` is tt/bb/tb/bt is deinterlaced: `deinterlace_vaapi` (motion adaptive) on QSV/VAAPI,
+  `bwdif_cuda` on NVENC, `bwdif` (send_frame) on the CPU and before libplacebo renders; the VAAPI deinterlacer drops
+  the last frame, which validate allows for interlaced sources only) and `CROP` (default off: `crop_rect` from the
+  black-bar detection, centred, even, ignored under 2 %; QSV crops and scales in one `vpp_qsv` step, VAAPI and NVENC
+  crop on the CPU (CPU decode), CPU backends and renders crop before scaling; never for Dolby Vision 8.1 output).
+  Verified with `validate` on synthetic interlaced (576i MPEG-2) and letterboxed (1080p with 140 px bars) sources.
+- **Job steps and progress:** each conversion lists its steps (`job_steps`: Converting/Remuxing, Injecting HDR10+,
+  Injecting Dolby Vision, Checking output, Installing, Subtitles) and records the current one in
+  `<work>/progress.json`; ffmpeg writes `-progress` to `<work>/progress.txt`. The queue page shows "(n/N) step",
+  and during the conversion step the real position over the source's duration, the speed and the time left
+  ("finishing" once ffmpeg reports the end). At worker start, temporary files and injection folders of an
+  interrupted job are removed (`remove_stale_work_files`).
 - **Subtitle settings:** `SUBTITLE_MODE` `extract` (default: sidecars, as described below) or `embed` (wanted-language
   streams mapped into the output and copied, `mov_text` converted to SRT; `subtitle_extractions` returns nothing and
   the subtitle pass is skipped, so nothing is stripped). `BITMAP_SUBTITLES` when extracting: `ocr` (default),

@@ -164,6 +164,47 @@ class BackendTests(unittest.TestCase):
         with patch.object(m, "video_bitrate", return_value=1e6):  # tone mapping is never a remux
             self.assertIsNone(m.remux_decision(f["hdr10"], m.HDR10_PQ, "x.mkv"))
 
+    def test_keyframes_lookahead_deinterlace_crop(self):
+        f = fixtures()
+        sdr_i = VideoInfo(color_transfer="bt709", color_primaries="bt709", color_space="bt709", color_range="tv",
+                          codec_name="mpeg2video", width=720, height=576, field_order="tt")
+        m.apply_conversion_settings({"keyframe_seconds": 5, "lookahead": 40})
+        cmd = m.build_cmd("in.mkv", "out.mkv", False, f["sdr"])
+        self.assertEqual(cmd[cmd.index("-g") + 1], "300")
+        self.assertEqual(cmd[cmd.index("-force_key_frames") + 1], "expr:gte(t,n_forced*5)")
+        self.assertEqual(cmd[cmd.index("-look_ahead_depth") + 1], "40")
+        self.assertNotIn("deinterlace_vaapi", cmd[cmd.index("-vf:v:0") + 1])  # progressive: untouched
+        cmd = m.build_cmd("in.mkv", "out.mkv", False, sdr_i)  # interlaced DVD source: deinterlaced on the GPU
+        self.assertIn("deinterlace_vaapi=rate=frame", cmd[cmd.index("-vf:v:0") + 1])
+        cmd = m.build_cmd("in.mkv", "out.mkv", True, sdr_i)  # software decode: bwdif on the CPU
+        self.assertIn("bwdif=mode=send_frame", cmd[cmd.index("-vf:v:0") + 1])
+        m.apply_conversion_settings({"deinterlace": False})
+        self.assertNotIn("deinterlace", " ".join(m.build_cmd("in.mkv", "out.mkv", False, sdr_i)))
+        # crop: QSV crops and scales in one vpp_qsv step; VAAPI crops on the CPU; Dolby Vision output never cropped
+        m.apply_conversion_settings({"crop": True})
+        with patch.object(m, "picture_area", return_value=(3840, 1600)):
+            cmd = m.build_cmd("in.mkv", "out.mkv", False, f["hdr10"])
+            vf = cmd[cmd.index("-vf:v:0") + 1]
+            self.assertIn("vpp_qsv=cx=0:cy=280:cw=3840:ch=1600:w=3840:h=1600:format=p010", vf)
+            self.assertNotIn("scale_vaapi", vf)
+            cmd = m.build_cmd("in.mkv", "out.mkv", False, f["dv8"])  # default: Dolby Vision 8.1, full frame
+            self.assertNotIn("crop", cmd[cmd.index("-vf:v:0") + 1])
+            m.apply_conversion_settings({"crop": True, "backend": "vaapi", "max_height": 1080})
+            m.CAPABILITIES = self.caps(("vaapi", "/dev/dri/renderD128", "hevc", True))
+            cmd = m.build_cmd("in.mkv", "out.mkv", False, f["hdr10"])
+            self.assertNotIn("-hwaccel", cmd)
+            self.assertIn("crop=3840:1600:0:280,format=p010le,hwupload,scale_vaapi", cmd[cmd.index("-vf:v:0") + 1])
+        with patch.object(m, "picture_area", return_value=(3840, 2156)):  # no real bars
+            self.assertIsNone(m.crop_rect("x.mkv", f["hdr10"]))
+        self.assertEqual(encoders.fit(3840, 1600, 1920, 1080), (1920, 800))
+
+    def test_software_lookahead(self):
+        m.apply_conversion_settings({"backend": "software", "lookahead": 60})
+        cmd = m.build_cmd("in.mkv", "out.mkv", False, fixtures()["hdr10"])
+        self.assertIn("rc-lookahead=60", cmd[cmd.index("-x265-params") + 1])
+        cmd = m.build_cmd("in.mkv", "out.mkv", False, fixtures()["sdr"])
+        self.assertEqual(cmd[cmd.index("-svtav1-params") + 1], "lookahead=60")
+
     def test_vaapi_renders(self):
         f = fixtures()
         m.apply_conversion_settings({"backend": "vaapi", "output_hdr10": "sdr"})

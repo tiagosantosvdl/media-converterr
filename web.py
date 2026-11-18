@@ -70,34 +70,41 @@ def first(form: dict, key: str) -> str:
 
 
 def read_progress(work_dir: str) -> dict | None:
-    """The running encode's real progress from ffmpeg's -progress file: {path, kind, pct, speed, left} or None."""
+    """The running job's state from the converter's note and ffmpeg's -progress file: {path, stage, step, steps, pct,
+    speed, left, ended} (pct/speed/left None outside the conversion step), or None when there is no note."""
     try:
         with open(os.path.join(work_dir, mc.PROGRESS_META), encoding="utf-8") as handle:
             meta = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    out = {"path": meta.get("path"), "kind": meta.get("kind"), "stage": meta.get("stage"), "step": meta.get("step"),
+           "steps": len(meta.get("steps") or []), "pct": None, "speed": None, "left": None, "ended": False}
+    try:
         with open(os.path.join(work_dir, mc.PROGRESS_FILE), "rb") as handle:
             handle.seek(0, os.SEEK_END)
             handle.seek(max(0, handle.tell() - 4096))
             text = handle.read().decode("utf-8", "replace")
-    except (OSError, ValueError):
-        return None
+    except OSError:
+        return out
     values: dict[str, str] = {}
     for line in text.splitlines():
         key, _, value = line.partition("=")
         values[key.strip()] = value.strip()
+    out["ended"] = values.get("progress") == "end"
     try:
         position = int(values.get("out_time_us") or values.get("out_time_ms") or 0) / 1e6
     except ValueError:
         position = 0.0
     duration = float(meta.get("duration") or 0)
-    if not duration or position <= 0:
-        return {"path": meta.get("path"), "kind": meta.get("kind"), "pct": 0.0, "speed": None, "left": None}
-    try:
-        speed = float(values.get("speed", "").rstrip("x"))
-    except ValueError:
-        speed = None
-    left = (duration - position) / speed if speed else None
-    return {"path": meta.get("path"), "kind": meta.get("kind"), "pct": min(100.0, 100 * position / duration),
-            "speed": speed, "left": left}
+    if duration and position > 0:
+        out["pct"] = 100.0 if out["ended"] else min(99.9, 100 * position / duration)
+        try:
+            out["speed"] = float(values.get("speed", "").rstrip("x"))
+        except ValueError:
+            pass
+        if out["speed"] and not out["ended"]:
+            out["left"] = (duration - position) / out["speed"]
+    return out
 
 
 STATE_LABELS = {"running": "info", "queued": "", "retry_wait": "warn", "failed": "bad", "cancelled": "",
@@ -157,10 +164,17 @@ class Dashboard:
         for j in list(running) + list(rows):
             kind, title = icons.get(j["state"], ("clock", j["state"]))
             if j["state"] == "running" and progress and progress["path"] == j["path"]:
-                pct = progress["pct"]
-                speed = f" · {progress['speed']:.2f}×" if progress["speed"] else ""
-                bar = ui.progress(pct, f"{pct:.0f}%{speed}")
-                left = dur(progress["left"]) if progress["left"] is not None else "–"
+                step = (f"({progress['step']}/{progress['steps']}) {progress['stage']}"
+                        if progress["steps"] and progress["stage"] else "")
+                converting = progress["stage"] in (None, "Converting", "Remuxing")
+                if converting and progress["pct"] is not None and not progress["ended"]:
+                    speed = f" · {progress['speed']:.2f}×" if progress["speed"] else ""
+                    bar = ui.progress(progress["pct"], f"{progress['pct']:.0f}%{speed}")
+                    left = dur(progress["left"]) if progress["left"] is not None else "–"
+                else:
+                    bar, left = ui.progress(100 if not converting or progress["ended"] else 0,
+                                            "finishing" if converting else "working"), "–"
+                kind, title = "info", step or "Converting"
             elif j["state"] == "running":  # no progress file (an older converter, or not started yet): a guess
                 elapsed = time.time() - (j["started_at"] or time.time())
                 pct = min(99, 100 * elapsed / avg) if avg else None
@@ -173,7 +187,9 @@ class Dashboard:
                       f"{icon('refresh', 16)}</button></form>" if j["state"] in ("failed", "cancelled") else "")
             error = f"<div class='bad' style='font-size:12px'>{esc((j['last_error'] or '')[:200])}</div>" \
                 if j["last_error"] and j["state"] != "running" else ""
-            out.append([ui.status_icon(kind, title), f"{name(j['path'])}{error}",
+            step_line = (f"<div class='muted' style='font-size:12px'>{esc(title)}</div>"
+                         if j["state"] == "running" and progress and progress["path"] == j["path"] else "")
+            out.append([ui.status_icon(kind, title), f"{name(j['path'])}{step_line}{error}",
                         f"<span class='muted'>{esc(j['trigger'])}</span>", f"<span class='muted'>"
                         f"{when(j['started_at'] if j['state'] == 'running' else j['enqueued_at'])}</span>",
                         left, bar, action])
@@ -907,6 +923,20 @@ class Dashboard:
                 g("CPU H.264 quality", ui.text_input("software_h264_crf", c["software_h264_crf"], kind="number",
                                                      attrs="min='0' max='51'"),
                   "x264 CRF. Provisional default 19.", advanced=True),
+                g("Keyframe interval", ui.text_input("keyframe_seconds", c["keyframe_seconds"], kind="number",
+                                                     attrs="min='1' max='20'"),
+                  "Seconds between keyframes; seeking jumps to them. 2 suits streaming; 5–10 saves a few percent "
+                  "for files played from your own disk."),
+                g("Look-ahead", ui.text_input("lookahead", c["lookahead"], kind="number", attrs="min='0' max='250'"),
+                  "Frames the encoder looks ahead to spread bits (QSV look_ahead_depth; NVENC uses up to 32, "
+                  "SVT-AV1 up to 120). More can help quality slightly, at some speed and memory.", advanced=True),
+                g("Deinterlace", ui.checkbox("deinterlace", c["deinterlace"], "Deinterlace interlaced sources"),
+                  "Sources flagged interlaced (DVDs, older TV) are deinterlaced on the GPU where possible, one frame "
+                  "per frame; progressive sources are untouched."),
+                g("Crop black bars", ui.checkbox("crop", c["crop"], "Remove black bars"),
+                  "Measured at five points of the film. Saves bits on letterboxed sources; never applied to Dolby "
+                  "Vision output (its metadata describes the full frame). On VAAPI and NVIDIA, cropping decodes on "
+                  "the CPU."),
                 "<h2>Dynamic range</h2>",
                 g("HDR10 and HDR10+ sources", ui.select("output_hdr10", [
                     ("hdr10plus", "HDR10, keeping HDR10+"), ("hdr10", "HDR10 (drop HDR10+)"), ("sdr", "SDR")],
@@ -966,6 +996,9 @@ class Dashboard:
                   "av1_quality": first(form, "av1_quality") or None, "hevc_quality": first(form, "hevc_quality") or None,
                   "preset": first(form, "preset") or None, "max_height": first(form, "max_height") or None,
                   "remux_enabled": bool(form.get("remux_enabled")),
+                  "deinterlace": bool(form.get("deinterlace")), "crop": bool(form.get("crop")),
+                  "keyframe_seconds": first(form, "keyframe_seconds") or None,
+                  "lookahead": first(form, "lookahead") or None,
                   "remux_mbps_per_mpx": first(form, "remux_mbps_per_mpx") or None,
                   "audio_languages": first(form, "audio_languages").replace(";", ",").split(","),
                   "subtitle_languages": first(form, "subtitle_languages").replace(";", ",").split(",")}

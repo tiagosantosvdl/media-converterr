@@ -50,7 +50,15 @@ def make_sources(work: str) -> dict[str, str]:
          "transfer=smpte2084:colormatrix=bt2020nc:repeat-headers=1", "-color_primaries", "bt2020", "-color_trc",
          "smpte2084", "-colorspace", "bt2020nc", "-c:a", "aac", "-metadata:s:a:0", "language=eng", hdr]
         ).check_returncode()
-    return {"sdr": sdr, "hdr10": hdr}
+    dvd, bars = os.path.join(work, "dvd.mkv"), os.path.join(work, "bars.mkv")
+    run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=720x576:rate=50:duration=3",
+         "-vf", "interlace=scan=tff", "-c:v", "mpeg2video", "-flags", "+ildct+ilme", "-top", "1", "-b:v", "6M",
+         "-color_primaries", "bt470bg", "-color_trc", "bt709", "-colorspace", "bt470bg", dvd]).check_returncode()
+    run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1920x800:rate=24:duration=3",
+         "-vf", "pad=1920:1080:0:140:black", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+         "-x264-params", "colorprim=bt709:transfer=bt709:colormatrix=bt709", "-color_primaries", "bt709",
+         "-color_trc", "bt709", "-colorspace", "bt709", bars]).check_returncode()
+    return {"sdr": sdr, "hdr10": hdr, "dvd": dvd, "bars": bars}
 
 
 def decoded_frames(path: str) -> int:
@@ -128,10 +136,18 @@ def check(name: str, source: str, settings: dict, expect: dict, work: str, injec
     for wanted in expect.get("side_data", ()):
         if wanted not in frames:
             result["problems"].append(f"missing {wanted}")
+    if expect.get("progressive") and got.field_order not in ("", "progressive", "unknown"):
+        result["problems"].append(f"still interlaced ({got.field_order})")
+    if expect.get("size") and (got.width, got.height) != expect["size"]:
+        result["problems"].append(f"size {got.width}x{got.height}, expected {expect['size'][0]}x{expect['size'][1]}")
     if inject and not result.get("injected"):
         result["problems"].append(f"{inject} injection did not verify")
-    if mc5.count_video_frames(out) != mc5.count_video_frames(source):
-        result["problems"].append("frame count differs from the source")
+    frames, source_frames = mc5.count_video_frames(out), mc5.count_video_frames(source)
+    # a motion-adaptive deinterlacer (VAAPI's default) needs a following frame: the last one is dropped; harmless,
+    # interlaced sources never carry HDR10+ or Dolby Vision (the injections that need exact counts)
+    allowed = 1 if expect.get("progressive") else 0
+    if not 0 <= source_frames - frames <= allowed:
+        result["problems"].append(f"{frames} frames, the source has {source_frames}")
     result["ok"] = not result["problems"]
     return result
 
@@ -161,6 +177,10 @@ def run_all(work: str, sample: str = "") -> dict:
                               {**hdr, "codec": codec}))
         sdr_codec = next((c for c in ("av1", "hevc", "h264") if (c, c != "h264") in mine), None)
         if sdr_codec:
+            tests.append((f"{backend}-deinterlace-{sdr_codec}", "dvd", {**base, "sdr_codec": sdr_codec},
+                          {"codec": sdr_codec, "progressive": True}))
+            tests.append((f"{backend}-crop-{sdr_codec}", "bars", {**base, "sdr_codec": sdr_codec, "crop": True},
+                          {**sdr, "codec": sdr_codec, "size": (1920, 800)}))
             tests.append((f"{backend}-tonemap-quality-{sdr_codec}", "hdr10",
                           {**base, "output_hdr10": "sdr", "sdr_codec": sdr_codec}, {**sdr, "codec": sdr_codec}))
             if backend in ("qsv", "vaapi"):

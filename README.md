@@ -36,9 +36,9 @@ are expected to work where their capability check passes, but haven't been valid
 
 | GPU | Backend | Passed | ffmpeg, kernel |
 |---|---|---|---|
-| Intel Arc Pro B50 (Battlemage G21, Xe2) | qsv | SDR AV1/HEVC/H.264, HDR10 HEVC/AV1, tone mapping quality and fast, Dolby Vision 8.1 (sample) | 8.1.3-Jellyfin, Linux 7.2 |
-| Intel Arc Pro B50 (Battlemage G21, Xe2) | vaapi | SDR AV1/HEVC/H.264, HDR10 HEVC/AV1, tone mapping fast (quality falls back to it) | 8.1.3-Jellyfin, Linux 7.2 |
-| (CPU on the same machine) | software | SDR AV1/HEVC/H.264, HDR10 HEVC/AV1, tone mapping quality | 8.1.3-Jellyfin, Linux 7.2 |
+| Intel Arc Pro B50 (Battlemage G21, Xe2) | qsv | SDR AV1/HEVC/H.264, HDR10 HEVC/AV1, tone mapping quality and fast, deinterlace, crop, Dolby Vision 8.1 (sample) | 8.1.3-Jellyfin, Linux 7.2 |
+| Intel Arc Pro B50 (Battlemage G21, Xe2) | vaapi | SDR AV1/HEVC/H.264, HDR10 HEVC/AV1, tone mapping fast (quality falls back to it), deinterlace, crop | 8.1.3-Jellyfin, Linux 7.2 |
+| (CPU on the same machine) | software | SDR AV1/HEVC/H.264, HDR10 HEVC/AV1, tone mapping quality, deinterlace, crop | 8.1.3-Jellyfin, Linux 7.2 |
 
 Not validated yet: NVIDIA (NVENC), AMD (VAAPI, AMF), Intel before Arc, Dolby Vision profile 5 sources.
 
@@ -121,7 +121,8 @@ conversions per day, space saved), errors, Sonarr/Radarr events and the live log
   another codec on the GPU or the codec on the CPU), SDR codec (AV1, HEVC, H.264), HDR codec (HEVC, AV1), what each
   kind of source becomes (HDR10/HDR10+, HLG, Dolby Vision: keep HDR, keep HDR10+, Dolby Vision 8.1, or tone map to
   SDR with libplacebo or the GPU's faster filter), subtitles (extracted next to the video or kept in the container;
-  bitmap subtitles OCR'd to SRT, extracted as they are, or dropped), (AV1 or HEVC; HDR is always HEVC), quality per encoder, encoder preset, maximum
+  bitmap subtitles OCR'd to SRT, extracted as they are, or dropped), keyframe interval, look-ahead, deinterlacing
+  of interlaced sources (on by default) and black-bar cropping (off by default), (AV1 or HEVC; HDR is always HEVC), quality per encoder, encoder preset, maximum
   resolution, whether efficient sources are kept by remux and the limit for that (Mbit/s per megapixel of picture,
   black bars excluded), and the audio/subtitle languages. Changes apply to files converted afterwards.
 - **Webhooks:** **Register webhooks** creates or updates a Webhook connection named `media-converterr` in each

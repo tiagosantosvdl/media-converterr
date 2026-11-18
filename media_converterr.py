@@ -2700,6 +2700,45 @@ PROGRESS_FILE = "progress.txt"   # ffmpeg -progress output of the running encode
 PROGRESS_META = "progress.json"  # which file it is and how long it plays, for the web interface
 
 
+def _write_meta(settings: Settings, **fields: Any) -> None:
+    """Merge fields into the running job's note for the web interface (progress.json)."""
+    path = os.path.join(settings.work_dir, PROGRESS_META)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            meta = json.load(handle)
+    except (OSError, ValueError):
+        meta = {}
+    if fields.get("path") and meta.get("path") != fields["path"]:
+        meta = {}  # another job's note
+    meta.update(fields)
+    with contextlib.suppress(OSError):
+        with open(path + ".tmp", "w", encoding="utf-8") as handle:
+            json.dump(meta, handle)
+        os.replace(path + ".tmp", path)
+
+
+def job_steps(video_info: Any, mode: str, remux: Optional[str], subtitles: Sequence[Any]) -> list[str]:
+    """The steps of one conversion, as the web interface shows them ("(2/5) Injecting Dolby Vision")."""
+    legacy = get_legacy_converter()
+    steps = ["Remuxing" if remux else "Converting"]
+    if not remux:
+        spec = legacy.output_spec(video_info, mode)
+        hevc = legacy.output_codec(mode, video_info) == "hevc"
+        if hevc and spec.target in ("hdr10plus", "dv81") and video_info.hdr10_plus:
+            steps.append("Injecting HDR10+")
+        if hevc and spec.target == "dv81":
+            steps.append("Injecting Dolby Vision")
+    steps += ["Checking output", "Installing"]
+    if subtitles:
+        steps.append("Subtitles")
+    return steps
+
+
+def set_stage(settings: Settings, input_path: str, steps: list[str], stage: str) -> None:
+    _write_meta(settings, path=input_path, steps=steps, stage=stage,
+                step=steps.index(stage) + 1 if stage in steps else 0)
+
+
 def with_progress(command: list[str], input_path: str, settings: Settings, kind: str) -> list[str]:
     """The ffmpeg command with -progress reporting into the work dir, and the note the web interface reads beside
     it (source path, playing time, what is running). Real progress: encoded position over the source's duration."""
@@ -2711,16 +2750,13 @@ def with_progress(command: list[str], input_path: str, settings: Settings, kind:
     progress = os.path.join(settings.work_dir, PROGRESS_FILE)
     with contextlib.suppress(OSError):
         os.remove(progress)
-    try:
-        with open(os.path.join(settings.work_dir, PROGRESS_META), "w", encoding="utf-8") as handle:
-            json.dump({"path": input_path, "duration": duration, "kind": kind, "started": time.time()}, handle)
-    except OSError:
-        return command
+    _write_meta(settings, path=input_path, duration=duration, kind=kind, started=time.time())
     return [command[0], "-progress", progress, "-stats_period", "5", *command[1:]]
 
 
 def encode_video(input_path: str, temp_path: str, video_info: Any, mode: str, extra_args: Sequence[str],
-                 settings: Settings, logger: logging.Logger) -> None:
+                 settings: Settings, logger: logging.Logger,
+                 stage: Optional[Callable[[str], None]] = None) -> None:
     """The encode itself: hardware first, software decode/filter fallback, then HDR10+ injection for HEVC outputs.
     Raises on failure; validation and installation are the caller's."""
     legacy = get_legacy_converter()
@@ -2754,9 +2790,13 @@ def encode_video(input_path: str, temp_path: str, video_info: Any, mode: str, ex
     spec = legacy.output_spec(video_info, mode)
     hevc = legacy.output_codec(mode, video_info) == "hevc"
     if spec.target in ("hdr10plus", "dv81") and video_info.hdr10_plus:
+        if hevc and stage:
+            stage("Injecting HDR10+")
         if hevc and legacy.inject_hdr10plus(input_path, temp_path, settings.work_dir, logger):
             logger.info("HDR10+ metadata injected: %s", input_path)
     if spec.target == "dv81":
+        if hevc and stage:
+            stage("Injecting Dolby Vision")
         if hevc and legacy.inject_dovi(input_path, temp_path, settings.work_dir, logger):
             logger.info("Dolby Vision profile 8.1 injected: %s", input_path)
         elif not hevc:
@@ -2853,6 +2893,9 @@ def process_conversion_job(
         subtitle_args, subtitle_temps = legacy.subtitle_output_args(subtitles, temp_path)
         # a manual Re-encode (forced job) always encodes; the remux rule only governs automatic jobs
         remux = None if forced else legacy.remux_decision(video_info, mode, input_path)
+        steps = job_steps(video_info, mode, remux, subtitles)
+        stage = lambda name: set_stage(settings, input_path, steps, name)  # noqa: E731
+        stage(steps[0])
         if remux:
             command = with_progress(legacy.build_remux_cmd(input_path, temp_path, video_info, mode) + subtitle_args,
                                     input_path, settings, "remux")
@@ -2867,7 +2910,8 @@ def process_conversion_job(
             if legacy.count_video_frames(temp_path) != legacy.count_video_frames(input_path):
                 raise RuntimeError("remux output has a different frame count than the source")
         else:
-            encode_video(input_path, temp_path, video_info, mode, subtitle_args, settings, logger)
+            encode_video(input_path, temp_path, video_info, mode, subtitle_args, settings, logger, stage)
+        stage("Checking output")
         output_info = legacy.validate_output(temp_path, mode, video_info,
                                              expected_codec=video_info.codec_name if remux else None)
         logger.info(
@@ -2898,6 +2942,7 @@ def process_conversion_job(
         if current_signature != start_signature:
             raise SourceChangedError("source changed during conversion")
 
+        stage("Installing")
         backup_path = legacy.install_output(input_path, temp_path, output_path)
         output_signature = SourceSignature.from_path(output_path)
         try:
@@ -2927,6 +2972,8 @@ def process_conversion_job(
             backup_path = None
             raise
 
+        if subtitles:
+            stage("Subtitles")
         installed = place_subtitles(output_path, subtitle_temps, settings, logger)
         if subtitles:
             logger.info("Subtitles extracted: %d of %d (%s): %s", installed, len(subtitles),
@@ -3113,6 +3160,28 @@ class GpuLock:
             fcntl.flock(self.fd, fcntl.LOCK_UN)
 
 
+def remove_stale_work_files(settings: Settings, logger: logging.Logger) -> None:
+    """At worker start nothing is running (the worker lock is held): temporary encodes, subtitle temporaries and
+    injection folders left by an interrupted job are removed, and the progress note."""
+    removed = 0
+    for path in glob.glob(os.path.join(glob.escape(settings.work_dir), "temp.converterr.*")) + \
+            glob.glob(os.path.join(glob.escape(settings.work_dir), "hdr10plus.*")) + \
+            glob.glob(os.path.join(glob.escape(settings.work_dir), "dovi.*")) + \
+            [os.path.join(settings.work_dir, PROGRESS_FILE), os.path.join(settings.work_dir, PROGRESS_META)]:
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            elif os.path.exists(path):
+                os.remove(path)
+            else:
+                continue
+            removed += 1
+        except OSError as error:
+            logger.warning("Could not remove leftover %s: %s", path, error)
+    if removed:
+        logger.info("Removed %d leftover work file(s) of an interrupted job", removed)
+
+
 def refresh_capabilities(conn: sqlite3.Connection, logger: logging.Logger, *, force: bool = False) -> dict:
     """Run the hardware/encoder check when it was never run or ffmpeg or the devices changed; store and apply it."""
     import encoders
@@ -3148,6 +3217,7 @@ def run_worker(
     gpu = GpuLock(os.environ.get("GPU_LOCK"))
     waiting_for_gpu = False
 
+    remove_stale_work_files(settings, logger)
     refresh_capabilities(conn, logger)
     settings_version = settings_store.version(conn)
     while not STOP_REQUESTED:

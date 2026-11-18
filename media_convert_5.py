@@ -119,6 +119,10 @@ TONEMAP = "quality"
 # (the stream as is: .sup, or .idx with .sub) or "drop".
 SUBTITLE_MODE = "extract"
 BITMAP_SUBTITLES = "ocr"
+KEYFRAME_SECONDS = 2   # one keyframe at least this often (seeking jumps to keyframes)
+LOOKAHEAD = 100        # frames the encoder looks ahead (QSV look_ahead_depth; others their own equivalent)
+DEINTERLACE = True     # deinterlace sources flagged interlaced (DVD, older TV), one frame per frame
+CROP = False           # crop black bars (never for Dolby Vision output: its metadata describes the full frame)
 OUTPUT_CHOICES = {"output_hdr10": ("hdr10plus", "hdr10", "sdr"), "output_hlg": ("hlg", "sdr"),
                   "output_dv": ("dv81", "hdr10plus", "hdr10", "sdr"), "output_dv5": ("hdr10", "sdr")}
 # Encoder backend ("auto", "qsv", "software"; see encoders.py) and the stored capability check that "auto" uses.
@@ -142,6 +146,7 @@ def conversion_defaults() -> dict:
     return {"backend": "auto", "sdr_codec": "av1", "hdr_codec": "hevc", "codec_fallback": "gpu",
             "output_hdr10": "hdr10plus", "output_hlg": "hlg", "output_dv": "dv81", "output_dv5": "hdr10",
             "tonemap": "quality", "subtitle_mode": "extract", "bitmap_subtitles": "ocr",
+            "keyframe_seconds": 2, "lookahead": 100, "deinterlace": True, "crop": False,
             "av1_quality": 20, "hevc_quality": 16, "h264_quality": 21, "software_av1_crf": 25,
             "software_hevc_crf": 18, "software_h264_crf": 19, "preset": "slow", "max_height": 2160,
             "remux_enabled": True, "remux_mbps_per_mpx": 1.8,
@@ -173,6 +178,12 @@ def validate_conversion_settings(values: dict) -> dict:
     if merged["max_height"] not in MAX_RESOLUTIONS:
         raise ValueError("maximum resolution must be 2160, 1440, 1080 or 720")
     merged["remux_enabled"] = bool(merged["remux_enabled"])
+    merged["deinterlace"], merged["crop"] = bool(merged["deinterlace"]), bool(merged["crop"])
+    merged["keyframe_seconds"], merged["lookahead"] = int(merged["keyframe_seconds"]), int(merged["lookahead"])
+    if not 1 <= merged["keyframe_seconds"] <= 20:
+        raise ValueError("keyframe interval must be between 1 and 20 seconds")
+    if not 0 <= merged["lookahead"] <= 250:
+        raise ValueError("look-ahead must be between 0 and 250 frames")
     merged.pop("remux_mbps", None)  # per-resolution limits of an earlier draft
     merged["remux_mbps_per_mpx"] = float(merged["remux_mbps_per_mpx"])
     if not 0 <= merged["remux_mbps_per_mpx"] <= 50:
@@ -197,6 +208,7 @@ def apply_conversion_settings(values: Optional[dict]) -> dict:
     global SDR_CODEC, GQ, HEVC_GQ, PRESET, TARGET_WIDTH, TARGET_HEIGHT, REMUX_ENABLED, REMUX_MBPS_PER_MPX
     global BACKEND, SOFTWARE_AV1_CRF, SOFTWARE_HEVC_CRF, HDR_CODEC, CODEC_FALLBACK, H264_GQ, SOFTWARE_H264_CRF
     global OUTPUT_HDR10, OUTPUT_HLG, OUTPUT_DV, OUTPUT_DV5, TONEMAP, SUBTITLE_MODE, BITMAP_SUBTITLES
+    global KEYFRAME_SECONDS, LOOKAHEAD, DEINTERLACE, CROP
     global wanted_audio_languages, wanted_subtitle_languages
     merged = validate_conversion_settings(values or {})
     SDR_CODEC, GQ, HEVC_GQ, PRESET = merged["sdr_codec"], merged["av1_quality"], merged["hevc_quality"], merged["preset"]
@@ -211,6 +223,8 @@ def apply_conversion_settings(values: Optional[dict]) -> dict:
                                                        merged["output_dv"], merged["output_dv5"])
     TONEMAP = merged["tonemap"]
     SUBTITLE_MODE, BITMAP_SUBTITLES = merged["subtitle_mode"], merged["bitmap_subtitles"]
+    KEYFRAME_SECONDS, LOOKAHEAD = merged["keyframe_seconds"], merged["lookahead"]
+    DEINTERLACE, CROP = merged["deinterlace"], merged["crop"]
     wanted_audio_languages = list(merged["audio_languages"])
     wanted_subtitle_languages = list(merged["subtitle_languages"])
     return merged
@@ -667,6 +681,7 @@ class VideoInfo:
     has_content_light_level: bool = False
     width: int = 0
     height: int = 0
+    field_order: str = ""  # ffprobe: progressive, tt, bb, tb, bt (interlaced) or unknown/empty
 
 
 # H.273 values shared by FFmpeg and AV1. Unknown values are resolved separately;
@@ -820,6 +835,7 @@ def probe_video_info(inp: str) -> VideoInfo:
         **probe_color_properties(stream, probe.get("frames", []), inp),
         width=optional_int(stream.get("width")) or 0,
         height=optional_int(stream.get("height")) or 0,
+        field_order=str(stream.get("field_order") or "").lower(),
         codec_name=str(stream.get("codec_name", "")).lower(),
         dovi_profile=optional_int(dovi.get("dv_profile")) if dovi else None,
         dovi_compatibility_id=(
@@ -1223,11 +1239,15 @@ def build_cmd(
         else:
             plan = encoders.Plan("software", "software", plan.codec, plan.codec != "h264")
     codec = plan.codec
+    interlaced = DEINTERLACE and info.field_order in ("tt", "bb", "tb", "bt")
+    crop = None
+    if CROP and spec.target != "dv81":  # Dolby Vision metadata describes the full frame: never cropped
+        crop = crop_rect(input_path, info)
     pipe = encoders.backend(plan.backend, CAPABILITIES).pipeline(
                             plan, render=render, setparams=setparams,
                             color_range=colors["color_range"], width=TARGET_WIDTH, height=TARGET_HEIGHT,
                             software_decode=software_fallback, preset=PRESET, hdr=spec.target != "sdr",
-                            gpu_tonemap=gpu_tonemap,
+                            gpu_tonemap=gpu_tonemap, deinterlace=interlaced, crop=crop, lookahead=LOOKAHEAD,
                             quality={"av1": GQ, "hevc": HEVC_GQ, "h264": H264_GQ, "software_av1": SOFTWARE_AV1_CRF,
                                      "software_hevc": SOFTWARE_HEVC_CRF, "software_h264": SOFTWARE_H264_CRF})
     hardware_init, accel, vf, encoder = pipe.hardware_init, pipe.accel, pipe.vf, pipe.encoder
@@ -1274,8 +1294,8 @@ def build_cmd(
         *color_args,
         *encoder,
         *pipe.extra,
-        "-g", "120",
-        "-force_key_frames", "expr:gte(t,n_forced*2)",
+        "-g", str(KEYFRAME_SECONDS * 60),
+        "-force_key_frames", f"expr:gte(t,n_forced*{KEYFRAME_SECONDS})",
         "-cluster_time_limit", "5000",
         "-cluster_size_limit", "5242880",
         "-bsf:v:0", metadata_bsf,
@@ -1346,18 +1366,33 @@ def picture_area(path: str, info: VideoInfo, duration: Optional[float] = None) -
             duration = float(probe.stdout.strip())
         except ValueError:
             return None
-    width = height = 0
+    width = height = left = top = 0
     for position in CROP_SAMPLES:
         p = subprocess.run(["ffmpeg", "-hide_banner", "-nostdin", "-ss", f"{duration * position:.1f}", "-i", path,
                             "-map", "0:v:0", "-t", "2", "-vf", "cropdetect=limit=0.1:round=2:reset=0", "-f", "null",
                             "-"], capture_output=True, text=True)
-        crops = re.findall(r"crop=(\d+):(\d+):\d+:\d+", p.stderr)
+        crops = re.findall(r"crop=(\d+):(\d+):(\d+):(\d+)", p.stderr)
         if crops:
-            w, h = (int(v) for v in crops[-1])
-            width, height = max(width, w), max(height, h)
+            w, h, x, y = (int(v) for v in crops[-1])
+            if w * h > width * height:
+                width, height, left, top = w, h, x, y
+            else:
+                width, height = max(width, w), max(height, h)
     if not width or not height:
         return None
     return min(width, info.width or width), min(height, info.height or height)
+
+
+def crop_rect(path: str, info: VideoInfo) -> Optional[tuple[int, int, int, int]]:
+    """(width, height, x, y) of the picture without black bars, centred on the frame, even sizes; None when there are
+    no bars worth cropping (under 2 % on both axes) or they can't be measured."""
+    area = picture_area(path, info)
+    if not area or not info.width or not info.height:
+        return None
+    w, h = area[0] - area[0] % 2, area[1] - area[1] % 2
+    if w >= info.width * 0.98 and h >= info.height * 0.98:
+        return None
+    return w, h, (info.width - w) // 2 // 2 * 2, (info.height - h) // 2 // 2 * 2
 
 
 def remux_decision(info: VideoInfo, mode: str, path: str) -> Optional[str]:

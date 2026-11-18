@@ -288,6 +288,24 @@ class ServerTests(unittest.TestCase):
                     "frame=20\nout_time_us=250000000\nspeed=1.50x\nprogress=continue\n")
         p = web_module.read_progress(work)
         self.assertEqual((p["path"], round(p["pct"]), p["speed"], round(p["left"])), ("/m/a.mkv", 25, 1.5, 500))
+        settings = mc.load_settings(self.config)
+        settings = mc.dataclasses.replace(settings, work_dir=work)
+        mc.set_stage(settings, "/m/a.mkv", ["Converting", "Injecting Dolby Vision", "Checking output"],
+                     "Injecting Dolby Vision")
+        with open(os.path.join(work, mc.PROGRESS_FILE), "a") as f:
+            f.write("out_time_us=990000000\nprogress=end\n")
+        p = web_module.read_progress(work)
+        self.assertEqual((p["stage"], p["step"], p["steps"], p["ended"], p["pct"]),
+                         ("Injecting Dolby Vision", 2, 3, True, 100.0))
+        self.assertEqual(json.load(open(os.path.join(work, mc.PROGRESS_META)))["duration"], 1000.0)  # merged
+        info = mc5_info = __import__("media_convert_5").VideoInfo(
+            color_transfer="smpte2084", color_primaries="bt2020", color_space="bt2020nc", color_range="tv",
+            codec_name="hevc", dovi_profile=8, dovi_compatibility_id=1, dovi_bl_present=True, hdr10_plus=True)
+        self.assertEqual(mc.job_steps(info, "hdr10-pq", None, [1]),
+                         ["Converting", "Injecting HDR10+", "Injecting Dolby Vision", "Checking output", "Installing",
+                          "Subtitles"])
+        self.assertEqual(mc.job_steps(info, "hdr10-pq", "low bitrate", []), ["Remuxing", "Checking output",
+                                                                             "Installing"])
 
     def test_cross_site_posts_are_refused(self):
         self.request("/setup", {"skip": "1"})

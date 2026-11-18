@@ -80,10 +80,24 @@ def tonemap_vaapi(fmt: str) -> str:
     return f"tonemap_vaapi=format={fmt}:p=bt709:t=bt709:m=bt709"
 
 
-def _cpu_render(render: str, ten_bit: bool = True) -> str:
-    """A libplacebo render (which also scales): CPU-decoded frames uploaded to Vulkan, rendered, downloaded for the
-    encoder. Mapping VAAPI frames into Vulkan instead crashed on Intel Arc (Battlemage) with ffmpeg 8.1."""
-    return f"format=p010le,hwupload,{render},hwdownload,format=p010le" + ("" if ten_bit else ",format=nv12")
+def _cpu_render(render: str, ten_bit: bool = True, pre: str = "") -> str:
+    """A libplacebo render (which also scales): CPU-decoded frames (cropped/deinterlaced first by `pre`) uploaded to
+    Vulkan, rendered, downloaded for the encoder. Mapping VAAPI frames into Vulkan instead crashed on Intel Arc
+    (Battlemage) with ffmpeg 8.1."""
+    return (f"{pre}format=p010le,hwupload,{render},hwdownload,format=p010le"
+            + ("" if ten_bit else ",format=nv12"))
+
+
+def fit(w: int, h: int, width: int, height: int) -> tuple[int, int]:
+    """(w, h) scaled down to fit width x height, keeping the aspect ratio; even sizes."""
+    f = min(1.0, width / w, height / h)
+    return int(w * f) // 2 * 2, int(h * f) // 2 * 2
+
+
+def _cpu_pre(deinterlace: bool, crop: Optional[tuple]) -> str:
+    """CPU filters ahead of scaling: crop to the picture, deinterlace (bwdif, one frame per frame)."""
+    out = f"crop={crop[0]}:{crop[1]}:{crop[2]}:{crop[3]}," if crop else ""
+    return out + ("bwdif=mode=send_frame," if deinterlace else "")
 
 
 def _value(quality: dict, codec: str, software: bool = False) -> str:
@@ -99,7 +113,8 @@ class QsvBackend:
 
     def pipeline(self, plan: Plan, *, render: Optional[str], setparams: str, color_range: str, width: int,
                  height: int, software_decode: bool, quality: dict, preset: str, hdr: bool,
-                 gpu_tonemap: bool = False) -> Pipeline:
+                 gpu_tonemap: bool = False, deinterlace: bool = False, crop: Optional[tuple] = None,
+                 lookahead: int = 100) -> Pipeline:
         w, h = _scale(width, height)
         fmt = "p010" if plan.ten_bit else "nv12"
         scale = f"scale_vaapi={w}:{h}:force_original_aspect_ratio=decrease:format={fmt}:out_range={color_range}"
@@ -108,28 +123,41 @@ class QsvBackend:
         accel = ["-hwaccel", "vaapi", "-hwaccel_device", "va", "-hwaccel_output_format", "vaapi"]
         init = ["-init_hw_device", f"vaapi=va:{plan.device}", "-init_hw_device", "qsv=qsv@va",
                 "-filter_hw_device", "va"]
-        if gpu_tonemap and not software_decode:
+        deint = "deinterlace_vaapi=rate=frame," if deinterlace else ""
+        if deinterlace:
+            vf = f"{setparams},{deint}{scale},{hwmap}"
+        if crop and not render and not software_decode:
+            # crop and scale in one QSV video-processing step (VAAPI's scaler can't crop)
+            ow, oh = fit(crop[0], crop[1], width, height)
+            vpp = (f"vpp_qsv=cx={crop[2]}:cy={crop[3]}:cw={crop[0]}:ch={crop[1]}:w={ow}:h={oh}:format={fmt}"
+                   + (":deinterlace=2" if deinterlace else ""))
+            first = f"{tonemap_vaapi(fmt)}," if gpu_tonemap else ""
+            vf = f"{first}{setparams},{hwmap},{vpp}"
+        elif gpu_tonemap and not software_decode:
             # Intel's VPP tone mapping (HDR10/HLG and Dolby Vision's HDR10 base) on the GPU; setparams re-tags the
             # frames so ffmpeg needn't convert hardware frames to match the output colour options
-            vf = f"{tonemap_vaapi(fmt)},{setparams},{scale},{hwmap}"
+            vf = f"{deint}{tonemap_vaapi(fmt)},{setparams},{scale},{hwmap}"
         elif render:
             # Vulkan opened on its own: derived from the VAAPI device, uploads were about 7x slower (Intel Arc)
             init = ["-init_hw_device", f"vaapi=va:{plan.device}", "-init_hw_device", "qsv=qsv@va",
                     "-init_hw_device", "vulkan=vk", "-filter_hw_device", "vk"]
             accel = []
-            vf = _cpu_render(render, plan.ten_bit)  # the QSV encoder takes the frames from system memory
+            # the QSV encoder takes the frames from system memory
+            vf = _cpu_render(render, plan.ten_bit, _cpu_pre(deinterlace, crop))
         elif software_decode:
             accel = []
-            vf = f"{setparams},format={fmt}{'le' if plan.ten_bit else ''},hwupload,{scale},{hwmap}"
+            vf = (f"{setparams},{_cpu_pre(deinterlace, crop)}format={fmt}{'le' if plan.ten_bit else ''},hwupload,"
+                  f"{scale},{hwmap}")
+        look = str(lookahead)
         if plan.codec == "av1":
-            encoder = ["-c:v:0", "av1_qsv", "-preset", preset, "-extbrc", "1", "-look_ahead_depth", "100",
+            encoder = ["-c:v:0", "av1_qsv", "-preset", preset, "-extbrc", "1", "-look_ahead_depth", look,
                        "-global_quality", _value(quality, "av1")]
         elif plan.codec == "hevc":
             encoder = ["-c:v:0", "hevc_qsv", "-profile:v:0", "main10" if plan.ten_bit else "main", "-preset", preset,
-                       "-extbrc", "1", "-look_ahead_depth", "100", "-global_quality", _value(quality, "hevc")]
+                       "-extbrc", "1", "-look_ahead_depth", look, "-global_quality", _value(quality, "hevc")]
         else:
             encoder = ["-c:v:0", "h264_qsv", "-profile:v:0", "high", "-preset", preset, "-extbrc", "1",
-                       "-look_ahead_depth", "100", "-global_quality", _value(quality, "h264")]
+                       "-look_ahead_depth", look, "-global_quality", _value(quality, "h264")]
         return Pipeline(init, accel, vf, encoder, ["-async_depth", "4"])
 
     def test_commands(self, device: str) -> dict[tuple[str, bool], list[str]]:
@@ -157,15 +185,24 @@ class VaapiBackend:
 
     def pipeline(self, plan: Plan, *, render: Optional[str], setparams: str, color_range: str, width: int,
                  height: int, software_decode: bool, quality: dict, preset: str, hdr: bool,
-                 gpu_tonemap: bool = False) -> Pipeline:
+                 gpu_tonemap: bool = False, deinterlace: bool = False, crop: Optional[tuple] = None,
+                 lookahead: int = 100) -> Pipeline:
         w, h = _scale(width, height)
         fmt = "p010" if plan.ten_bit else "nv12"
         scale = f"scale_vaapi={w}:{h}:force_original_aspect_ratio=decrease:format={fmt}:out_range={color_range}"
         init = ["-init_hw_device", f"vaapi=va:{plan.device}", "-filter_hw_device", "va"]
         accel = ["-hwaccel", "vaapi", "-hwaccel_device", "va", "-hwaccel_output_format", "vaapi"]
-        vf = f"{setparams},{scale}"
-        if gpu_tonemap and not software_decode:
-            vf = f"{tonemap_vaapi(fmt)},{setparams},{scale}"
+        deint = "deinterlace_vaapi=rate=frame," if deinterlace else ""
+        vf = f"{setparams},{deint}{scale}"
+        if crop and not render:
+            # VAAPI's scaler can't crop: decode on the CPU, crop (and deinterlace) there, then upload
+            accel = []
+            vf = f"{setparams},{_cpu_pre(deinterlace, crop)}format={fmt}{'le' if plan.ten_bit else ''},hwupload,{scale}"
+            if gpu_tonemap:
+                vf = (f"{_cpu_pre(deinterlace, crop)}format=p010le,hwupload,{tonemap_vaapi(fmt)},{setparams},"
+                      f"{scale}")
+        elif gpu_tonemap and not software_decode:
+            vf = f"{deint}{tonemap_vaapi(fmt)},{setparams},{scale}"
         elif render:
             # ffmpeg 8.1 can't hand frames that went through Vulkan to a VAAPI encoder (hwupload from a Vulkan filter
             # device fails): media_convert_5.build_cmd tone maps with the GPU's own filter instead and sends Dolby
@@ -173,7 +210,7 @@ class VaapiBackend:
             raise ValueError("VAAPI encoders can't take libplacebo-rendered frames")
         elif software_decode:
             accel = []
-            vf = f"{setparams},format={fmt}{'le' if plan.ten_bit else ''},hwupload,{scale}"
+            vf = f"{setparams},{_cpu_pre(deinterlace, None)}format={fmt}{'le' if plan.ten_bit else ''},hwupload,{scale}"
         value = _value(quality, plan.codec)
         rc = (["-rc_mode", "ICQ", "-global_quality", value] if self.rate_control.get(plan.device, "ICQ") == "ICQ"
               else ["-rc_mode", "CQP", "-qp", value])
@@ -203,21 +240,25 @@ class NvencBackend:
 
     def pipeline(self, plan: Plan, *, render: Optional[str], setparams: str, color_range: str, width: int,
                  height: int, software_decode: bool, quality: dict, preset: str, hdr: bool,
-                 gpu_tonemap: bool = False) -> Pipeline:
+                 gpu_tonemap: bool = False, deinterlace: bool = False, crop: Optional[tuple] = None,
+                 lookahead: int = 100) -> Pipeline:
         w, h = _scale(width, height)
         fmt = "p010le" if plan.ten_bit else "nv12"
         init: list[str] = []
         accel = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-        vf = f"{setparams},scale_cuda={w}:{h}:force_original_aspect_ratio=decrease:format={fmt}"
+        deint = "bwdif_cuda=mode=send_frame," if deinterlace else ""
+        vf = f"{setparams},{deint}scale_cuda={w}:{h}:force_original_aspect_ratio=decrease:format={fmt}"
         if render:
             init = ["-init_hw_device", "vulkan=vk", "-filter_hw_device", "vk"]
             accel = []
-            vf = _cpu_render(render, plan.ten_bit)
-        elif software_decode:
+            vf = _cpu_render(render, plan.ten_bit, _cpu_pre(deinterlace, crop))
+        elif software_decode or crop:  # scale_cuda can't crop: the CPU does
             accel = []
-            vf = f"{setparams},scale={w}:{h}:force_original_aspect_ratio=decrease:out_range={color_range},format={fmt}"
+            vf = (f"{setparams},{_cpu_pre(deinterlace, crop)}scale={w}:{h}:force_original_aspect_ratio=decrease:"
+                  f"out_range={color_range},format={fmt}")
         encoder = ["-c:v:0", f"{plan.codec}_nvenc", "-preset", NVENC_PRESETS.get(preset, "p6"), "-tune", "hq",
-                   "-rc", "vbr", "-cq", _value(quality, plan.codec), "-b:v", "0"]
+                   "-rc", "vbr", "-cq", _value(quality, plan.codec), "-b:v", "0", "-rc-lookahead",
+                   str(min(lookahead, 32))]
         if plan.codec == "hevc":
             encoder += ["-profile:v:0", "main10" if plan.ten_bit else "main"]
         elif plan.codec == "h264":
@@ -241,15 +282,16 @@ class AmfBackend:
 
     def pipeline(self, plan: Plan, *, render: Optional[str], setparams: str, color_range: str, width: int,
                  height: int, software_decode: bool, quality: dict, preset: str, hdr: bool,
-                 gpu_tonemap: bool = False) -> Pipeline:
+                 gpu_tonemap: bool = False, deinterlace: bool = False, crop: Optional[tuple] = None,
+                 lookahead: int = 100) -> Pipeline:
         w, h = _scale(width, height)
         fmt = "p010le" if plan.ten_bit else "nv12"
         scale = f"scale={w}:{h}:force_original_aspect_ratio=decrease:out_range={color_range}"
         init: list[str] = []
-        vf = f"{setparams},{scale},format={fmt}"
+        vf = f"{setparams},{_cpu_pre(deinterlace, crop)}{scale},format={fmt}"
         if render:
             init = ["-init_hw_device", "vulkan=vk", "-filter_hw_device", "vk"]
-            vf = _cpu_render(render, plan.ten_bit)
+            vf = _cpu_render(render, plan.ten_bit, _cpu_pre(deinterlace, crop))
         value = _value(quality, plan.codec)
         encoder = ["-c:v:0", f"{plan.codec}_amf", "-quality", AMF_QUALITY.get(preset, "quality"), "-rc", "cqp",
                    "-qp_i", value, "-qp_p", value]
@@ -277,25 +319,26 @@ class SoftwareBackend:
 
     def pipeline(self, plan: Plan, *, render: Optional[str], setparams: str, color_range: str, width: int,
                  height: int, software_decode: bool, quality: dict, preset: str, hdr: bool,
-                 gpu_tonemap: bool = False) -> Pipeline:
+                 gpu_tonemap: bool = False, deinterlace: bool = False, crop: Optional[tuple] = None,
+                 lookahead: int = 100) -> Pipeline:
         w, h = _scale(width, height)
         scale = f"scale={w}:{h}:force_original_aspect_ratio=decrease:out_range={color_range}"
         pix = "yuv420p" if plan.codec == "h264" else "yuv420p10le"
         init: list[str] = []
-        vf = f"{setparams},{scale},format={pix}"
+        vf = f"{setparams},{_cpu_pre(deinterlace, crop)}{scale},format={pix}"
         if render:
             init = ["-init_hw_device", "vulkan=vk", "-filter_hw_device", "vk"]
-            vf = _cpu_render(render) + f",format={pix}"
+            vf = _cpu_render(render, pre=_cpu_pre(deinterlace, crop)) + f",format={pix}"
         if plan.codec == "av1":
             encoder = ["-c:v:0", "libsvtav1", "-preset", str(SVT_PRESETS.get(preset, 5)),
-                       "-crf", _value(quality, "av1", True)]
+                       "-crf", _value(quality, "av1", True), "-svtav1-params", f"lookahead={min(lookahead, 120)}"]
         elif plan.codec == "hevc":
-            params = "hdr10-opt=1:repeat-headers=1" if hdr else "repeat-headers=1"
+            params = ("hdr10-opt=1:repeat-headers=1" if hdr else "repeat-headers=1") + f":rc-lookahead={lookahead}"
             encoder = ["-c:v:0", "libx265", "-profile:v:0", "main10", "-preset", preset,
                        "-crf", _value(quality, "hevc", True), "-x265-params", params]
         else:
             encoder = ["-c:v:0", "libx264", "-profile:v:0", "high", "-preset", preset,
-                       "-crf", _value(quality, "h264", True)]
+                       "-crf", _value(quality, "h264", True), "-rc-lookahead", str(lookahead)]
         return Pipeline(init, [], vf, encoder, [])
 
     def test_commands(self, device: str) -> dict[tuple[str, bool], list[str]]:
