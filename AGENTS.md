@@ -232,6 +232,10 @@ step validated before the next, and keep Linux behaviour unchanged (all tests, i
 
 ## Known issues / open items
 
+- **Brazilian Portuguese naming:** `.pt-BR.srt` is the name Jellyfin maps to "Portuguese (Brazil)" (language
+  `pt-br`) and Bazarr to `pb`; some TV clients still print the raw "pt-br" because Brazilian Portuguese has no
+  three-letter code of its own. `.pob.srt` (OpenSubtitles' code) was tried: Bazarr reads it as Brazilian, but
+  Jellyfin and Wholphin don't recognise it ("pob - Undefined"), so `.pt-BR` stays.
 - **Blu-ray `.m2ts` streams carry no language tags** (they live in the disc's playlist files): every track reads as
   untagged, so all audio is kept (untagged streams are) and no subtitle is extracted (untagged ones can't be named).
 
