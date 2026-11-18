@@ -232,6 +232,9 @@ step validated before the next, and keep Linux behaviour unchanged (all tests, i
 
 ## Known issues / open items
 
+- **Blu-ray `.m2ts` streams carry no language tags** (they live in the disc's playlist files): every track reads as
+  untagged, so all audio is kept (untagged streams are) and no subtitle is extracted (untagged ones can't be named).
+
 - **Dolby Vision → HDR10+ not implemented:** DV output choices are HDR10 from the base layer (keeping HDR10+ when the
   source also has it), Dolby Vision 8.1, or SDR. Generating HDR10+ from the RPU's L1 values is still a proposal.
 - **HDR10+ and Dolby Vision injection on a full WEB-DL carrying both** is not yet verified. Refusals seen on clips

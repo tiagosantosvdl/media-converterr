@@ -59,7 +59,7 @@ LOG_BACKUP_COUNT = 5
 # Watched folders and convertible extensions
 watched_folders = os.environ.get("MEDIA_CONVERT_FOLDERS", "/media/movies:/media/series").split(":")
 exclude = []
-convertible_extensions = ["rmvb", "mkv", "avi", "mov", "wmv", "m4v", "mp4"]
+convertible_extensions = ["rmvb", "mkv", "avi", "mov", "wmv", "m4v", "mp4", "m2ts", "mts", "ts", "mpg", "mpeg", "vob", "webm", "flv", "3gp"]
 
 # Transcode policy
 TARGET_WIDTH = 3840

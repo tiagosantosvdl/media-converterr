@@ -16,7 +16,8 @@ from typing import Iterable, Optional
 VALID = re.compile(r"^\.(?P<lang>[a-z]{2,3}(?:-[A-Z]{2})?)(?:\.hi)?(?:\.forced)?$")
 HEARING_IMPAIRED = {"hi", "sdh", "cc"}
 FORCED = {"forced", "foreign"}
-VIDEO_EXTENSIONS = (".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".rmvb", ".ts")
+VIDEO_EXTENSIONS = (".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".rmvb", ".ts", ".m2ts", ".mts", ".mpg", ".mpeg",
+                    ".vob", ".webm", ".flv", ".3gp")
 
 _WORDS = {
     "en": {"the", "you", "and", "what", "that", "it's", "don't", "i'm", "this", "with", "have", "your", "just"},

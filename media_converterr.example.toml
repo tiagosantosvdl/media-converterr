@@ -8,7 +8,8 @@ work_dir = "/data"                              # temporary encodes are written 
 lock = "/data/media_convert.lock"
 log_dir = "/data/logs"
 exclude = ["#recycle", "@eaDir"]
-convertible_extensions = ["rmvb", "mkv", "avi", "mov", "wmv", "m4v", "mp4"]
+# leave out to use the defaults (every common video container)
+# convertible_extensions = ["rmvb", "mkv", "avi", "mov", "wmv", "m4v", "mp4", "m2ts", "mts", "ts", "mpg", "mpeg", "vob", "webm", "flv", "3gp"]
 unlinked_folders = []                           # folders scanned even though no *arr manages them
 poll_seconds = 5
 settle_seconds = 10                             # wait for a file to stop changing before converting
