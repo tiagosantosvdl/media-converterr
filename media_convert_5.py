@@ -122,6 +122,8 @@ BITMAP_SUBTITLES = "ocr"
 KEYFRAME_SECONDS = 2   # one keyframe at least this often (seeking jumps to keyframes)
 LOOKAHEAD = 100        # frames the encoder looks ahead (QSV look_ahead_depth; others their own equivalent)
 DEINTERLACE = True     # deinterlace sources flagged interlaced (DVD, older TV), one frame per frame
+# European Portuguese subtitles ("pt"): "always", "fallback" (only for videos without a Brazilian one) or "never"
+EUROPEAN_PT = "always"
 CROP = False           # crop black bars (never for Dolby Vision output: its metadata describes the full frame)
 OUTPUT_CHOICES = {"output_hdr10": ("hdr10plus", "hdr10", "sdr"), "output_hlg": ("hlg", "sdr"),
                   "output_dv": ("dv81", "hdr10plus", "hdr10", "sdr"), "output_dv5": ("hdr10", "sdr")}
@@ -147,6 +149,7 @@ def conversion_defaults() -> dict:
             "output_hdr10": "hdr10plus", "output_hlg": "hlg", "output_dv": "dv81", "output_dv5": "hdr10",
             "tonemap": "quality", "subtitle_mode": "extract", "bitmap_subtitles": "ocr",
             "keyframe_seconds": 2, "lookahead": 100, "deinterlace": True, "crop": False,
+            "european_portuguese": "always",
             "av1_quality": 20, "hevc_quality": 16, "h264_quality": 21, "software_av1_crf": 25,
             "software_hevc_crf": 18, "software_h264_crf": 19, "preset": "slow", "max_height": 2160,
             "remux_enabled": True, "remux_mbps_per_mpx": 1.8,
@@ -161,6 +164,7 @@ def validate_conversion_settings(values: dict) -> dict:
     for key, choices in (("sdr_codec", ("av1", "hevc", "h264")), ("hdr_codec", ("hevc", "av1")),
                          ("codec_fallback", ("gpu", "cpu")), ("tonemap", ("quality", "fast")),
                          ("subtitle_mode", ("extract", "embed")), ("bitmap_subtitles", ("ocr", "sidecar", "drop")),
+                         ("european_portuguese", ("always", "fallback", "never")),
                          *OUTPUT_CHOICES.items()):
         if merged[key] not in choices:
             raise ValueError(f"{key.replace('_', ' ')} must be one of {', '.join(choices)}")
@@ -208,7 +212,7 @@ def apply_conversion_settings(values: Optional[dict]) -> dict:
     global SDR_CODEC, GQ, HEVC_GQ, PRESET, TARGET_WIDTH, TARGET_HEIGHT, REMUX_ENABLED, REMUX_MBPS_PER_MPX
     global BACKEND, SOFTWARE_AV1_CRF, SOFTWARE_HEVC_CRF, HDR_CODEC, CODEC_FALLBACK, H264_GQ, SOFTWARE_H264_CRF
     global OUTPUT_HDR10, OUTPUT_HLG, OUTPUT_DV, OUTPUT_DV5, TONEMAP, SUBTITLE_MODE, BITMAP_SUBTITLES
-    global KEYFRAME_SECONDS, LOOKAHEAD, DEINTERLACE, CROP
+    global KEYFRAME_SECONDS, LOOKAHEAD, DEINTERLACE, CROP, EUROPEAN_PT
     global wanted_audio_languages, wanted_subtitle_languages
     merged = validate_conversion_settings(values or {})
     SDR_CODEC, GQ, HEVC_GQ, PRESET = merged["sdr_codec"], merged["av1_quality"], merged["hevc_quality"], merged["preset"]
@@ -225,6 +229,7 @@ def apply_conversion_settings(values: Optional[dict]) -> dict:
     SUBTITLE_MODE, BITMAP_SUBTITLES = merged["subtitle_mode"], merged["bitmap_subtitles"]
     KEYFRAME_SECONDS, LOOKAHEAD = merged["keyframe_seconds"], merged["lookahead"]
     DEINTERLACE, CROP = merged["deinterlace"], merged["crop"]
+    EUROPEAN_PT = merged["european_portuguese"]
     wanted_audio_languages = list(merged["audio_languages"])
     wanted_subtitle_languages = list(merged["subtitle_languages"])
     return merged

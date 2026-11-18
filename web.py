@@ -989,6 +989,13 @@ class Dashboard:
                   "<code>name.pt-BR.hi.srt</code>); a release subtitle replaces a downloaded one (kept as a backup) "
                   "and forced tracks are merged into the full track of their language. Kept in the container: "
                   "copied as they are (MP4 text becomes SRT)."),
+                g("European Portuguese", ui.select("european_portuguese", [
+                    ("always", "Keep"), ("fallback", "Only when there is no Brazilian Portuguese"),
+                    ("never", "Never")], c["european_portuguese"]),
+                  "Releases tag both variants Portuguese; Brazilian text is recognised and named pt-BR. With "
+                  "\"only when there is no Brazilian\", a European subtitle is installed only for videos without a "
+                  "Brazilian one, and moved aside (backed up) by the library scan once a Brazilian one appears. "
+                  "Remove European Portuguese from Bazarr's language profile too, or it downloads them again."),
                 g("Bitmap subtitles", ui.select("bitmap_subtitles", [
                     ("ocr", "Convert to SRT (OCR)"), ("sidecar", "Extract as they are (.sup, .idx/.sub)"),
                     ("drop", "Drop")], c["bitmap_subtitles"]),
@@ -1001,7 +1008,7 @@ class Dashboard:
 
     def save_conversion(self, form: dict) -> str | None:
         keys = ("hdr_codec", "codec_fallback", "output_hdr10", "output_hlg", "output_dv", "output_dv5", "tonemap",
-                "h264_quality", "software_h264_crf", "subtitle_mode", "bitmap_subtitles")
+                "h264_quality", "software_h264_crf", "subtitle_mode", "bitmap_subtitles", "european_portuguese")
         values = {**{k: first(form, k) or None for k in keys},
                   "backend": first(form, "backend") or None, "software_av1_crf": first(form, "software_av1_crf") or None,
                   "software_hevc_crf": first(form, "software_hevc_crf") or None, "sdr_codec": first(form, "sdr_codec"),

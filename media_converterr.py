@@ -1799,6 +1799,7 @@ def scan_libraries(
     logger.info("Candidates found: %d", len(paths))
     for path in paths:
         if not dry_run:
+            retire_european_portuguese(path, settings, logger)
             record_sidecar_inventory(settings.database_path, path)
         try:
             signature = SourceSignature.from_path(path)
@@ -2093,6 +2094,7 @@ def place_subtitles(output_path: str, temps: dict[str, str], settings: Settings,
     texts = {k: v for k, v in temps.items() if k.endswith(".srt")}
     others = {k: v for k, v in temps.items() if k not in texts}
     fold_forced_subtitles(output_path, texts, settings, logger, fresh)
+    apply_portuguese_policy(output_path, texts, logger)
     temps.clear()
     temps.update(texts)
     temps.update(others)
@@ -2205,6 +2207,50 @@ def relabel_brazilian_tracks(output_path: str, temps: dict[str, str], logger: lo
         if language == "pt-BR":
             temps[brazilian] = temps.pop(suffix)
             logger.info("Subtitle %s reads as Brazilian Portuguese; installed as %s: %s", suffix, brazilian, output_path)
+
+
+def _has_brazilian(output_path: str, temps: dict[str, str]) -> bool:
+    stem = os.path.splitext(output_path)[0]
+    return any(k.startswith(".pt-BR.") for k in temps) or bool(glob.glob(glob.escape(stem) + ".pt-BR*.srt"))
+
+
+def apply_portuguese_policy(output_path: str, temps: dict[str, str], logger: logging.Logger) -> None:
+    """European Portuguese setting for pending subtitles (after Brazilian text was relabelled `.pt-BR`): "never"
+    drops `.pt` tracks; "fallback" drops them when the video has a Brazilian track (pending or in the library)."""
+    policy = get_legacy_converter().EUROPEAN_PT
+    if policy == "always":
+        return
+    if policy == "fallback" and not _has_brazilian(output_path, temps):
+        return
+    for suffix in [k for k in temps if k.startswith(".pt.")]:
+        with contextlib.suppress(OSError):
+            os.remove(temps[suffix])
+        del temps[suffix]
+        logger.info("European Portuguese subtitle %s not installed (setting: %s): %s", suffix, policy, output_path)
+
+
+def retire_european_portuguese(video_path: str, settings: Settings, logger: logging.Logger) -> int:
+    """Library side of the European Portuguese setting, run by the scan: `.pt` sidecars of a video that has a
+    Brazilian one ("fallback") or any ("never") move to `<database dir>/replaced-subtitles/` (never deleted)."""
+    policy = get_legacy_converter().EUROPEAN_PT
+    if policy == "always":
+        return 0
+    stem = os.path.splitext(video_path)[0]
+    european = glob.glob(glob.escape(stem) + ".pt.srt") + glob.glob(glob.escape(stem) + ".pt.*.srt")
+    if not european or (policy == "fallback" and not glob.glob(glob.escape(stem) + ".pt-BR*.srt")):
+        return 0
+    backup_root = os.path.join(os.path.dirname(settings.database_path), "replaced-subtitles")
+    moved = 0
+    for path in european:
+        backup = os.path.join(backup_root, path.lstrip("/"))
+        try:
+            os.makedirs(os.path.dirname(backup), exist_ok=True)
+            shutil.move(path, backup + (f".{int(time.time())}" if os.path.exists(backup) else ""))
+            moved += 1
+            logger.info("European Portuguese subtitle moved aside (setting: %s): %s", policy, path)
+        except OSError as error:
+            logger.warning("Could not move %s aside: %s", path, error)
+    return moved
 
 
 def mark_short_tracks_forced(output_path: str, temps: dict[str, str], logger: logging.Logger) -> None:

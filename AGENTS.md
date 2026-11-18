@@ -154,6 +154,12 @@ Still open: a calibration tool and a common quality scale (one level mapped to p
   and during the conversion step the real position over the source's duration, the speed and the time left
   ("finishing" once ffmpeg reports the end). At worker start, temporary files and injection folders of an
   interrupted job are removed (`remove_stale_work_files`).
+- **European Portuguese setting (`EUROPEAN_PT`):** `always` (default), `fallback` (a European `.pt` subtitle only
+  for videos without a Brazilian one) or `never`. Releases tag both variants `por`; Brazilian text is relabelled
+  `.pt-BR` first (`relabel_brazilian_tracks`), then `apply_portuguese_policy` drops pending `.pt` tracks as set, and
+  the scan's `retire_european_portuguese` moves library `.pt` sidecars made redundant by a Brazilian one (or all, with
+  `never`) to `replaced-subtitles/`. Bazarr has no fallback: European Portuguese must also leave its language
+  profile, or it downloads them again.
 - **Subtitle settings:** `SUBTITLE_MODE` `extract` (default: sidecars, as described below) or `embed` (wanted-language
   streams mapped into the output and copied, `mov_text` converted to SRT; `subtitle_extractions` returns nothing and
   the subtitle pass is skipped, so nothing is stripped). `BITMAP_SUBTITLES` when extracting: `ocr` (default),

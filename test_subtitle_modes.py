@@ -73,5 +73,54 @@ class SubtitleModeTests(unittest.TestCase):
             self.assertFalse(os.path.exists(mks))
 
 
+
+class EuropeanPortugueseTests(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(mc5.apply_conversion_settings, None)
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.video = os.path.join(self.dir.name, "Show - S01E01.mkv")
+        open(self.video, "w").close()
+
+    def temps(self, *suffixes):
+        out = {}
+        for suffix in suffixes:
+            path = os.path.join(self.dir.name, "tmp" + suffix)
+            open(path, "w").write("x")
+            out[suffix] = path
+        return out
+
+    def test_policy_on_pending_tracks(self):
+        log = logging.getLogger("t")
+        mc5.apply_conversion_settings({"european_portuguese": "always"})
+        t = self.temps(".pt.srt", ".pt-BR.srt"); mc.apply_portuguese_policy(self.video, t, log)
+        self.assertEqual(set(t), {".pt.srt", ".pt-BR.srt"})
+        mc5.apply_conversion_settings({"european_portuguese": "fallback"})
+        t = self.temps(".pt.srt", ".pt-BR.srt"); mc.apply_portuguese_policy(self.video, t, log)
+        self.assertEqual(set(t), {".pt-BR.srt"})
+        t = self.temps(".pt.srt", ".en.srt"); mc.apply_portuguese_policy(self.video, t, log)
+        self.assertEqual(set(t), {".pt.srt", ".en.srt"})  # no Brazilian anywhere: the European one stays
+        open(os.path.join(self.dir.name, "Show - S01E01.pt-BR.srt"), "w").close()  # a downloaded Brazilian one
+        t = self.temps(".pt.hi.srt"); mc.apply_portuguese_policy(self.video, t, log)
+        self.assertEqual(t, {})
+        mc5.apply_conversion_settings({"european_portuguese": "never"})
+        os.remove(os.path.join(self.dir.name, "Show - S01E01.pt-BR.srt"))
+        t = self.temps(".pt.srt"); mc.apply_portuguese_policy(self.video, t, log)
+        self.assertEqual(t, {})
+
+    def test_scan_moves_redundant_european_files_aside(self):
+        from types import SimpleNamespace
+        settings = SimpleNamespace(database_path=os.path.join(self.dir.name, "data", "db.sqlite"))
+        european = os.path.join(self.dir.name, "Show - S01E01.pt.srt")
+        open(european, "w").close()
+        mc5.apply_conversion_settings({"european_portuguese": "fallback"})
+        self.assertEqual(mc.retire_european_portuguese(self.video, settings, logging.getLogger("t")), 0)  # sole one
+        open(os.path.join(self.dir.name, "Show - S01E01.pt-BR.srt"), "w").close()
+        self.assertEqual(mc.retire_european_portuguese(self.video, settings, logging.getLogger("t")), 1)
+        self.assertFalse(os.path.exists(european))
+        backup = os.path.join(self.dir.name, "data", "replaced-subtitles", european.lstrip("/"))
+        self.assertTrue(os.path.exists(backup))
+
+
 if __name__ == "__main__":
     unittest.main()
