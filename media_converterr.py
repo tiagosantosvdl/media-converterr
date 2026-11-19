@@ -528,6 +528,12 @@ CREATE TABLE IF NOT EXISTS callbacks (
 );
 CREATE INDEX IF NOT EXISTS callbacks_claim
     ON callbacks(state, available_at, updated_at);
+CREATE TABLE IF NOT EXISTS release_sidecars (
+    sha1 TEXT PRIMARY KEY,
+    path TEXT NOT NULL,
+    how TEXT NOT NULL,
+    recorded_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS protected_sidecars (
     path TEXT PRIMARY KEY,
     backup TEXT NOT NULL,
@@ -2279,6 +2285,7 @@ def install_subtitles(output_path: str, temps: dict[str, str], settings: Setting
             os.replace(dest + ".tmp", dest)
             installed += 1
             record_sidecar_inventory(settings.database_path, output_path)
+            record_release_sidecars(settings.database_path, [dest], "installed")
         except OSError as error:
             logger.warning("Could not install subtitle %s for %s: %s", suffix, output_path, error)
         finally:
@@ -2657,6 +2664,87 @@ def _sha1(path: str) -> Optional[str]:
             return hashlib.sha1(handle.read()).hexdigest()
     except OSError:
         return None
+
+
+RELEASE_LIST = "release-subtitles.txt"
+
+
+def record_release_sidecars(database_path: str, paths: Sequence[str], how: str) -> int:
+    """Remember subtitle files that came from the release itself (extracted, OCR'd or identified from the file's own
+    streams) by content, so other tools can tell them from downloaded ones whatever their name later becomes: they are
+    trusted (subtitlerr may sync one but never replaces it). Also written as `<database dir>/release-subtitles.txt`,
+    one SHA-1 per line."""
+    rows = [(digest, path, how, time.time()) for path in paths for digest in [_sha1(path)] if digest]
+    try:
+        conn = sqlite3.connect(database_path, timeout=30)
+        conn.executescript("CREATE TABLE IF NOT EXISTS release_sidecars (sha1 TEXT PRIMARY KEY, path TEXT NOT NULL, "
+                           "how TEXT NOT NULL, recorded_at REAL NOT NULL)")
+        with conn:
+            conn.executemany("INSERT OR IGNORE INTO release_sidecars(sha1, path, how, recorded_at) VALUES(?,?,?,?)",
+                             rows)
+        digests = [row[0] for row in conn.execute("SELECT sha1 FROM release_sidecars ORDER BY sha1")]
+        conn.close()
+        listing = os.path.join(os.path.dirname(database_path), RELEASE_LIST)
+        with open(listing + ".tmp", "w", encoding="ascii") as f:
+            f.write("".join(d + "\n" for d in digests))
+        os.replace(listing + ".tmp", listing)
+    except (sqlite3.Error, OSError):
+        return 0
+    return len(rows)
+
+
+_LOG_LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),\d+ INFO (?:"
+                       r"Subtitles moved out: \d+ of \d+ streams extracted \((?P<moved>[^)]*)\), file remuxed without "
+                       r"subtitles: (?P<moved_path>.+)|"
+                       r"Subtitles extracted: \d+ of \d+ \((?P<extracted>[^)]*)\): (?P<extracted_path>.+)|"
+                       r"OCR (?P<ocr>\.[\w.-]+\.srt): \d+ cues, confidence [\d.]+: (?P<ocr_path>.+))$")
+BACKFILL_WINDOW = 900  # text subtitles are installed up to this long before the pass logs its summary (OCR runs between)
+
+
+def backfill_release_sidecars(settings: Settings, logger: logging.Logger, log_paths: Sequence[str]) -> dict[str, int]:
+    """One-off: find the subtitle files the converter extracted before it recorded them, from its log. A file counts
+    when it sits in the logged video's folder, ends in a logged suffix and was last modified within BACKFILL_WINDOW
+    seconds before the log line (renames keep the modification time; a later rewrite, such as a sync, moves it out of
+    the window and the file no longer is the release's)."""
+    import calendar
+    events: list[tuple[float, str, str]] = []
+    for log_path in log_paths:
+        try:
+            handle = open(log_path, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with handle:
+            for line in handle:
+                match = _LOG_LINE.match(line.rstrip("\n"))
+                if not match:
+                    continue
+                when = calendar.timegm(time.strptime(match[1], "%Y-%m-%d %H:%M:%S"))  # the log is written in UTC
+                video = match["moved_path"] or match["extracted_path"] or match["ocr_path"]
+                suffixes = match["moved"] or match["extracted"] or match["ocr"]
+                for suffix in (x.strip() for x in suffixes.split(",")):
+                    if suffix.endswith(".srt"):
+                        events.append((when, os.path.dirname(video), suffix))
+    found: set[str] = set()
+    listings: dict[str, list[str]] = {}
+    for when, folder, suffix in events:
+        if folder not in listings:
+            try:
+                listings[folder] = os.listdir(folder)
+            except OSError:
+                listings[folder] = []
+        for name in listings[folder]:
+            path = os.path.join(folder, name)
+            if not name.endswith(suffix):
+                continue
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            if when - BACKFILL_WINDOW <= mtime <= when + 5:
+                found.add(path)
+    recorded = record_release_sidecars(settings.database_path, sorted(found), "backfilled")
+    logger.info("Release subtitles backfilled from the log: %d events, %d files", len(events), recorded)
+    return {"events": len(events), "files": recorded}
 
 
 SIDECAR_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt", ".sup", ".idx", ".sub")
@@ -4013,6 +4101,11 @@ def build_parser() -> argparse.ArgumentParser:
         "fold-forced", help="merge .forced.srt sidecars into the full tracks of their language and remove them")
     fold_parser.add_argument("--dry-run", action="store_true", help="only report what would be merged")
 
+    release_parser = subparsers.add_parser(
+        "release-subtitles", help="list file: subtitle files that came from the releases (by content), for other tools")
+    release_parser.add_argument("--backfill", action="store_true",
+                                help="first find earlier extractions from the converter's log")
+
     languages_parser = subparsers.add_parser(
         "languages", help="report the subtitle language profiles learned from tagged subtitles (and which are used)")
     languages_parser.add_argument("--learn-library", action="store_true",
@@ -4125,6 +4218,14 @@ def command_main(args: argparse.Namespace) -> int:
             paths = [normalize_path(p) for p in args.paths] or collect_scan_paths(settings, logger)[0]
             counts = repair_sidecars_pass(settings, logger, paths, args.dry_run)
             print(json.dumps(counts))
+            return 0
+        if args.command == "release-subtitles":
+            if args.backfill:
+                logs = sorted(glob.glob(os.path.join(glob.escape(settings.log_dir), "media-converterr.log*")))
+                print(json.dumps(backfill_release_sidecars(settings, logger, logs)))
+            count = conn.execute("SELECT COUNT(*) FROM release_sidecars").fetchone()[0]
+            print(f"{count} release subtitle file(s); list: "
+                  f"{os.path.join(os.path.dirname(settings.database_path), RELEASE_LIST)}")
             return 0
         if args.command == "languages":
             import language_profiles
