@@ -55,8 +55,12 @@ def detect_language(text: str) -> Optional[str]:
     best, second = ranked[0], ranked[1]
     if counts[best] < MIN_WORDS or counts[best] < 2 * counts[second]:
         return None
-    if best != "pt":
-        return best
+    return best if best != "pt" else portuguese_variant(text)
+
+
+def portuguese_variant(text: str) -> str:
+    """pt (European) or pt-BR for a Portuguese SRT text, from the variants' typical phrasing."""
+    body = _MARKUP.sub(" ", "\n".join(l for l in text.splitlines() if not _TIMING.search(l))).lower()
     european = sum(len(re.findall(p, body)) for p in _PT_PT)
     brazilian = len(re.findall(_PT_BR[0], body)) / 4 + sum(len(re.findall(p, body)) for p in _PT_BR[1:])
     return "pt" if european > brazilian else "pt-BR"

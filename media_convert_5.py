@@ -1185,6 +1185,32 @@ def subtitle_extractions(path: str) -> list[SubtitleExtraction]:
     return out + later  # untagged last: a tagged stream wins a file name
 
 
+def learning_extractions(path: str, taken: list[SubtitleExtraction], wants) -> list[SubtitleExtraction]:
+    """Tagged text streams of languages the library extraction doesn't already cover, one per language, written in
+    the same ffmpeg pass so their text teaches the language profiles (`language_profiles`). `wants(language)` says
+    whether a language still needs tracks. Forced tracks are skipped (too little text)."""
+    probe = json.loads(subprocess.check_output([
+        "ffprobe", "-v", "error", "-select_streams", "s", "-show_entries",
+        "stream=index,codec_name:stream_tags=language,title:stream_disposition=forced", "-of", "json", path]))
+    seen = {s.code.split("-")[0] for s in taken if not s.code.startswith("und")}
+    out = []
+    for stream in probe.get("streams", []):
+        tags, disp = stream.get("tags") or {}, stream.get("disposition") or {}
+        language, title = tags.get("language"), str(tags.get("title") or "")
+        if stream.get("codec_name") not in TEXT_SUBTITLE_CODECS or language_keys(language) & UNTAGGED_LANGUAGES:
+            continue
+        if disp.get("forced") or "forced" in title.lower():
+            continue
+        tag = str(language).strip().lower()
+        code = subtitle_code(language, title) or (tag if re.fullmatch(r"[a-z]{3}", tag) else None)
+        primary = code.split("-")[0] if code else None
+        if not primary or primary in seen or not wants(primary):
+            continue
+        seen.add(primary)
+        out.append(SubtitleExtraction(stream["index"], f"learn-{primary}"))
+    return out
+
+
 def subtitle_output_args(extractions: list[SubtitleExtraction], temp_base: str) -> tuple[list[str], dict[str, str]]:
     """Extra ffmpeg outputs (placed after the main output) writing each subtitle to a temporary file: SRT for text
     streams, the bitmap stream copied as .sup for PGS or as a subtitle-only .mks for VobSub (OCR'd afterwards).

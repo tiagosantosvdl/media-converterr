@@ -28,7 +28,7 @@ RUN apt-get update \
  && apt-get purge -y gnupg curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY media_converterr.py media_convert_5.py ocr_subtitles.py forced_subs.py sidecar_names.py settings_store.py encoders.py gpus.py validate.py web_ui.py web.py clear_video_titles.py recover_deleted_entries.py container_entry.sh /app/
+COPY media_converterr.py media_convert_5.py ocr_subtitles.py forced_subs.py sidecar_names.py language_profiles.py settings_store.py encoders.py gpus.py validate.py web_ui.py web.py clear_video_titles.py recover_deleted_entries.py container_entry.sh /app/
 RUN chmod 0755 /app/container_entry.sh
 
 # Non-root by default; set `user:` in compose to the owner of your media library, and add the render group.

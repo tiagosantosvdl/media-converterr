@@ -2121,6 +2121,69 @@ def _sample_text(temp: str) -> str:
         return f.read()
 
 
+def detect_subtitle_language(text: str, settings: Optional[Settings] = None) -> Optional[str]:
+    """Language of a subtitle text: the profiles learned from the library's tagged subtitles when they are sure
+    (language_profiles), else the built-in word lists. Portuguese is split into pt / pt-BR by phrasing."""
+    import language_profiles
+    import sidecar_names
+    if settings is not None:
+        learned = language_profiles.model(settings.database_path)
+        found = learned.detect(text) if learned is not None else None
+        if found:
+            return sidecar_names.portuguese_variant(text) if found == "pt" else found
+    return sidecar_names.detect_language(text)
+
+
+def keep_untagged_sample(settings: Settings, output_path: str, suffix: str, language: Optional[str],
+                         text: str) -> None:
+    """Audit trail: the text of an untagged stream that was dropped as unclear or unwanted, in
+    `<database dir>/untagged-samples/`, to check on demand that it really is another language."""
+    path = os.path.join(os.path.dirname(settings.database_path), "untagged-samples",
+                        (os.path.splitext(output_path)[0] + suffix).lstrip("/")[:-4] + f".{language or 'unclear'}.srt")
+    with contextlib.suppress(OSError):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+
+def learning_streams(conn: sqlite3.Connection, legacy: Any, path: str, taken: list, logger: logging.Logger) -> list:
+    """The extra text streams to extract for the language profiles; none when probing fails."""
+    import language_profiles
+    try:
+        return legacy.learning_extractions(path, taken, lambda language: language_profiles.wants_more(conn, language))
+    except (subprocess.CalledProcessError, OSError, ValueError, sqlite3.Error) as error:
+        logger.warning("Language learning skipped for %s: %s", path, error)
+        return []
+
+
+def learn_subtitle_languages(conn: sqlite3.Connection, temps: dict[str, str], logger: logging.Logger,
+                             source: str) -> None:
+    """Count the tagged text subtitles of a job into the language profiles: the wanted ones (kept in `temps`) and the
+    `.learn-<lang>` extractions of other languages (removed from `temps` and deleted). Untagged streams are never
+    learned from (their language is a guess). Never fails the job."""
+    import language_profiles
+    for suffix in list(temps):
+        temp = temps[suffix]
+        language = suffix.split(".")[1]
+        learning = language.startswith("learn-")
+        if learning:
+            del temps[suffix]
+            language = language[len("learn-"):]
+        elif language.startswith("und") or temp.endswith((".sup", ".mks")):
+            continue
+        try:
+            with open(temp, encoding="utf-8", errors="replace") as f:
+                outcome = language_profiles.learn(conn, language.split("-")[0], f.read(), source, time.time())
+            if outcome in ("learned", "test"):
+                logger.debug("Language profile %s: %s from %s", language, outcome, source)
+        except (OSError, sqlite3.Error) as error:
+            logger.warning("Could not learn language %s from %s: %s", language, source, error)
+        finally:
+            if learning:
+                with contextlib.suppress(OSError):
+                    os.remove(temp)
+
+
 def identify_untagged(output_path: str, temps: dict[str, str], logger: logging.Logger,
                       settings: Optional[Settings] = None) -> None:
     """Name untagged streams (`.und<index>` entries of `temps`) after the language of their text, OCR'd from a
@@ -2138,7 +2201,7 @@ def identify_untagged(output_path: str, temps: dict[str, str], logger: logging.L
         except Exception as error:  # noqa: BLE001 - a broken stream shouldn't fail the job
             logger.warning("Untagged subtitle %s could not be read (%s); dropped: %s", suffix, error, output_path)
             text = ""
-        language = sidecar_names.detect_language(text) if text else None
+        language = detect_subtitle_language(text, settings) if text else None
         if language in ("pt", "pt-BR") and temp.endswith((".sup", ".mks")) and settings is not None:
             whole = {f".{language}.srt": temp}
             ocr_bitmap_subtitles(output_path, whole, settings, logger)
@@ -2162,6 +2225,10 @@ def identify_untagged(output_path: str, temps: dict[str, str], logger: logging.L
                 logger.info("Untagged subtitle %s: language unclear; dropped: %s", suffix, output_path)
             elif not legacy.language_is_wanted(language.split("-")[0], legacy.wanted_subtitle_languages):
                 logger.info("Untagged subtitle %s reads as %s (not wanted): %s", suffix, language, output_path)
+            if settings is not None and text and (
+                    not language
+                    or not legacy.language_is_wanted(language.split("-")[0], legacy.wanted_subtitle_languages)):
+                keep_untagged_sample(settings, output_path, suffix, language, text)
             with contextlib.suppress(OSError):
                 os.remove(temp)
             continue
@@ -2479,7 +2546,8 @@ def strip_subtitles(conn: sqlite3.Connection, path: str, settings: Settings, cat
     start = SourceSignature.from_path(path)
     temp_base = os.path.join(settings.work_dir, f"strip.{os.getpid()}.{uuid.uuid4().hex}.mkv")
     staged = os.path.join(os.path.dirname(path), f".{os.path.basename(path)}.partial")  # not a video name: arrs ignore it
-    sub_args, temps = legacy.subtitle_output_args(extractions, temp_base)
+    sub_args, temps = legacy.subtitle_output_args(extractions + learning_streams(conn, legacy, path, extractions,
+                                                                                 logger), temp_base)
     os.makedirs(settings.work_dir, exist_ok=True)
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", path,
            "-map", "0:v", "-map", "0:a?", "-map", "0:t?", "-c", "copy", "-map_metadata", "0", "-map_chapters", "0",
@@ -2516,6 +2584,7 @@ def strip_subtitles(conn: sqlite3.Connection, path: str, settings: Settings, cat
     if owner is not None:
         with conn:
             enqueue_callback(conn, owner, time.time() + settings.callback_delay_seconds)
+    learn_subtitle_languages(conn, temps, logger, path)
     bitmaps = {k: v for k, v in temps.items() if v.endswith((".sup", ".mks"))}
     texts = {k: v for k, v in temps.items() if k not in bitmaps}
     identify_untagged(path, texts, logger, settings)  # untagged bitmaps: in place_subtitles, on the OCR side
@@ -2912,6 +2981,40 @@ RAW_SUBTITLE = re.compile(r"^(?P<stem>.+?)(?P<suffix>\.[A-Za-z]{2,3}(?:-[A-Za-z]
                           r"(?P<ext>\.sup|\.mks)$")
 
 
+def learn_languages_from_library(conn: sqlite3.Connection, settings: Settings, logger: logging.Logger) -> dict:
+    """Seed the language profiles from the library's sidecar `.srt` files, the language taken from their names
+    (`.en.srt`, `.pt-BR.hi.srt`); forced tracks and badly named files are skipped."""
+    import language_profiles
+    import sidecar_names
+    counts: dict[str, int] = {}
+    for base in settings.scan_roots:
+        for root, dirs, files in os.walk(base):
+            dirs[:] = [d for d in dirs if d not in settings.exclude and not d.startswith(".")]
+            videos = [os.path.splitext(f)[0] for f in files if f.lower().endswith(sidecar_names.VIDEO_EXTENSIONS)]
+            for name in files:
+                if not name.lower().endswith(".srt"):
+                    continue
+                stem = max((v for v in videos if name.startswith(v + ".")), key=len, default=None)
+                if stem is None:
+                    continue
+                suffix = name[len(stem):-4]
+                if not sidecar_names.is_valid_suffix(suffix) or ".forced" in suffix:
+                    continue
+                language = suffix.split(".")[1].split("-")[0].lower()
+                if not language_profiles.wants_more(conn, language):
+                    counts["enough"] = counts.get("enough", 0) + 1
+                    continue
+                try:
+                    with open(os.path.join(root, name), encoding="utf-8", errors="replace") as f:
+                        outcome = language_profiles.learn(conn, language, f.read(), os.path.join(root, name),
+                                                          time.time())
+                except OSError:
+                    continue
+                counts[outcome] = counts.get(outcome, 0) + 1
+    logger.info("Language profiles learned from the library: %s", counts)
+    return counts
+
+
 def retry_rejected_ocr(settings: Settings, logger: logging.Logger, dry_run: bool = False) -> dict[str, int]:
     """OCR again the raw bitmap streams kept in `<database dir>/ocr-rejected/` after a failed OCR, and install the
     results next to their videos as a conversion would (forced folded, existing subtitle backed up). A raw stream
@@ -3197,7 +3300,9 @@ def process_conversion_job(
 
         # wanted text subtitles become .srt files next to the output (not embedded), from the same ffmpeg pass
         subtitles = legacy.subtitle_extractions(input_path)
-        subtitle_args, subtitle_temps = legacy.subtitle_output_args(subtitles, temp_path)
+        subtitle_args, subtitle_temps = legacy.subtitle_output_args(subtitles + learning_streams(conn, legacy,
+                                                                                                 input_path, subtitles,
+                                                                                                 logger), temp_path)
         # a manual Re-encode (forced job) always encodes; the remux rule only governs automatic jobs
         remux = None if forced else legacy.remux_decision(video_info, mode, input_path)
         steps = job_steps(video_info, mode, remux, subtitles)
@@ -3281,6 +3386,7 @@ def process_conversion_job(
 
         if subtitles:
             stage("Subtitles")
+        learn_subtitle_languages(conn, subtitle_temps, logger, input_path)
         installed = place_subtitles(output_path, subtitle_temps, settings, logger)
         if subtitles:
             logger.info("Subtitles extracted: %d of %d (%s): %s", installed, len(subtitles),
@@ -3907,6 +4013,11 @@ def build_parser() -> argparse.ArgumentParser:
         "fold-forced", help="merge .forced.srt sidecars into the full tracks of their language and remove them")
     fold_parser.add_argument("--dry-run", action="store_true", help="only report what would be merged")
 
+    languages_parser = subparsers.add_parser(
+        "languages", help="report the subtitle language profiles learned from tagged subtitles (and which are used)")
+    languages_parser.add_argument("--learn-library", action="store_true",
+                                  help="first learn from the library's subtitle files (language from their names)")
+
     sidecar_parser = subparsers.add_parser(
         "fix-sidecars", help="put back subtitle names mangled by a Sonarr/Radarr rename (.hi.srt, bare .srt)")
     sidecar_parser.add_argument("paths", nargs="*", help="videos (default: every library file)")
@@ -4014,6 +4125,15 @@ def command_main(args: argparse.Namespace) -> int:
             paths = [normalize_path(p) for p in args.paths] or collect_scan_paths(settings, logger)[0]
             counts = repair_sidecars_pass(settings, logger, paths, args.dry_run)
             print(json.dumps(counts))
+            return 0
+        if args.command == "languages":
+            import language_profiles
+            if args.learn_library:
+                print(json.dumps(learn_languages_from_library(conn, settings, logger)))
+            report = language_profiles.Model(conn).report
+            for language, row in sorted(report.items(), key=lambda kv: -kv[1]["tracks"]):
+                print(f"{language:4} tracks={row['tracks']:4} tests={row['tests']:3} recall={row['recall']} "
+                      f"precision={row['precision']} {'USED' if row['used'] else 'not used'}")
             return 0
         if args.command == "ocr-retry":
             counts = retry_rejected_ocr(settings, logger, args.dry_run)
