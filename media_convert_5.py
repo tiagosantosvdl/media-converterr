@@ -1474,6 +1474,13 @@ def source_kind(info: Optional[VideoInfo], mode: str) -> str:
     return "hlg" if mode == HDR_HLG else "hdr10"
 
 
+def dv7_note() -> str:
+    """What happens to a Dolby Vision profile 7 source's enhancement layer, by the Dolby Vision output setting."""
+    kept = ("its base layer and dynamic metadata become Dolby Vision 8.1" if OUTPUT_DV == "dv81"
+            else "encoding its HDR10 base layer")
+    return f"Dolby Vision profile 7 enhancement layer will not be retained; {kept}"
+
+
 def output_spec(info: Optional[VideoInfo], mode: str) -> OutputSpec:
     """The configured output for this source (settings OUTPUT_*, SDR_CODEC, HDR_CODEC). Without source details the
     source is taken as plain HDR10 (for display)."""
@@ -1775,10 +1782,7 @@ def main() -> int:
                     and video_info.dovi_profile == 7
                     and video_info.dovi_el_present
                 ):
-                    logger.warning(
-                        "Dolby Vision profile 7 enhancement layer will not be retained; "
-                        f"encoding its HDR10 base layer: {in_path}"
-                    )
+                    logger.warning(f"{dv7_note()}: {in_path}")
                 if video_info.hdr10_plus:
                     logger.info(
                         "HDR10+ input detected; output dynamic metadata will be verified "

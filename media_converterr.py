@@ -3017,11 +3017,7 @@ def process_conversion_job(
             and video_info.dovi_profile == 7
             and video_info.dovi_el_present
         ):
-            logger.warning(
-                "Dolby Vision profile 7 enhancement layer will not be retained; "
-                "encoding its HDR10 base layer: %s",
-                input_path,
-            )
+            logger.warning("%s: %s", legacy.dv7_note(), input_path)
 
         # wanted text subtitles become .srt files next to the output (not embedded), from the same ffmpeg pass
         subtitles = legacy.subtitle_extractions(input_path)
