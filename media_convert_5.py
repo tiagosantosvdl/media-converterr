@@ -1138,7 +1138,8 @@ def subtitle_code(language: Optional[str], title: str = "") -> Optional[str]:
 def subtitle_extractions(path: str) -> list[SubtitleExtraction]:
     """Subtitle streams in the wanted languages, to be written as sidecar .srt files (Bazarr naming). Text streams
     come first; bitmap streams (Blu-ray PGS, DVD VobSub) follow and are OCR'd, so a text stream wins a file name over
-    a bitmap one. Untagged streams have no language for a file name; a second stream with the same file name is
+    a bitmap one. Untagged streams (a lone Blu-ray `.m2ts` carries no language tags) come last as `und<index>`: their
+    language is read from the text when the subtitles are placed. A second stream with the same file name is
     skipped."""
     if SUBTITLE_MODE == "embed":
         return []  # kept in the container (stream_mapping_args)
@@ -1147,7 +1148,7 @@ def subtitle_extractions(path: str) -> list[SubtitleExtraction]:
         "stream=index,codec_name:stream_tags=language,title:stream_disposition=forced,hearing_impaired",
         "-of", "json", path]))
     logger = logging.getLogger(__name__)
-    out, names = [], set()
+    out, names, later = [], set(), []
     streams = probe.get("streams", [])
     streams = ([s for s in streams if s.get("codec_name") in TEXT_SUBTITLE_CODECS]
                + [s for s in streams if s.get("codec_name") not in TEXT_SUBTITLE_CODECS])
@@ -1155,11 +1156,9 @@ def subtitle_extractions(path: str) -> list[SubtitleExtraction]:
         index, codec = stream["index"], stream.get("codec_name")
         tags, disp = stream.get("tags") or {}, stream.get("disposition") or {}
         language, title = tags.get("language"), str(tags.get("title") or "")
-        if language_keys(language) & UNTAGGED_LANGUAGES or not language_is_wanted(language, wanted_subtitle_languages):
-            if not language_keys(language) & UNTAGGED_LANGUAGES:
-                continue  # unwanted language (logged by stream_mapping_args)
-            logger.warning(f"Not extracting untagged subtitle stream={index} path={path}")
-            continue
+        untagged = bool(language_keys(language) & UNTAGGED_LANGUAGES)
+        if not untagged and not language_is_wanted(language, wanted_subtitle_languages):
+            continue  # unwanted language (logged by stream_mapping_args)
         if codec not in TEXT_SUBTITLE_CODECS and codec not in BITMAP_KINDS:
             logger.warning(f"Skipping unsupported subtitle stream={index} language={language} "
                            f"codec={codec or 'unknown'} path={path}")
@@ -1167,7 +1166,7 @@ def subtitle_extractions(path: str) -> list[SubtitleExtraction]:
         if codec in BITMAP_KINDS and BITMAP_SUBTITLES == "drop":
             logger.info(f"Dropping bitmap subtitle stream={index} language={language} (setting) path={path}")
             continue
-        code = subtitle_code(language, title)
+        code = f"und{index}" if untagged else subtitle_code(language, title)  # untagged: named from its text later
         if code is None:
             logger.warning(f"Not extracting subtitle with unknown language stream={index} language={language} path={path}")
             continue
@@ -1175,12 +1174,15 @@ def subtitle_extractions(path: str) -> list[SubtitleExtraction]:
                                  hi=bool(disp.get("hearing_impaired")) or bool(re.search(r"\bsdh\b|\bcc\b|hearing", title, re.I)),
                                  forced=bool(disp.get("forced")) or "forced" in title.lower(),
                                  kind="text" if codec in TEXT_SUBTITLE_CODECS else BITMAP_KINDS[codec])
+        if untagged:
+            later.append(sub)
+            continue
         if sub.suffix in names:
             logger.info(f"Skipping second subtitle stream={index} for {sub.suffix} path={path}")
             continue
         names.add(sub.suffix)
         out.append(sub)
-    return out
+    return out + later  # untagged last: a tagged stream wins a file name
 
 
 def subtitle_output_args(extractions: list[SubtitleExtraction], temp_base: str) -> tuple[list[str], dict[str, str]]:

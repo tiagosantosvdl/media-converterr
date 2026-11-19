@@ -528,6 +528,14 @@ CREATE TABLE IF NOT EXISTS callbacks (
 );
 CREATE INDEX IF NOT EXISTS callbacks_claim
     ON callbacks(state, available_at, updated_at);
+CREATE TABLE IF NOT EXISTS protected_sidecars (
+    path TEXT PRIMARY KEY,
+    backup TEXT NOT NULL,
+    video TEXT NOT NULL,
+    source TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    release_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS sidecar_inventory (
     folder TEXT NOT NULL,
     sha1 TEXT NOT NULL,
@@ -1545,6 +1553,7 @@ def process_hook_event(
     if file_delete:
         for raw_path in current:
             path = translate_remote_path(raw_path, instance)
+            release_protected_sidecars(conn, path)
             with conn:
                 conn.execute("DELETE FROM files WHERE path=?", (path,))
                 conn.execute(
@@ -1556,6 +1565,7 @@ def process_hook_event(
                     (time.time(), path),
                 )
         logger.info("Processed %s delete event paths=%d", instance.name, len(current))
+        restore_protected_sidecars(conn, logger)
         return
 
     if entity_delete and entity_path:
@@ -2084,9 +2094,86 @@ def keep_bitmap_sidecars(temps: dict[str, str], logger: logging.Logger) -> None:
                     os.remove(temp)
 
 
+UNTAGGED_SAMPLE_CUES = 80    # subtitles OCR'd from an untagged bitmap stream to tell its language (40 sufficed on a real disc)
+HI_CUE_SHARE = 0.08          # share of cues with a [sound] or (sound) description that marks an untagged track HI
+_SOUND_CUE = re.compile(r"\[[^\]]+\]|\([A-Z][^)]*\)|♪|^[A-Z][A-Z .'-]{1,20}:", re.M)  # sounds, music, "MAN:"
+
+
+def _sample_text(temp: str) -> str:
+    """Text of an extracted subtitle temporary: an SRT read as is, a bitmap stream OCR'd from its first cues."""
+    import ocr_subtitles
+    if temp.endswith(".sup"):
+        with open(temp, "rb") as f:
+            return ocr_subtitles.sup_to_srt(f.read(), "und", limit=UNTAGGED_SAMPLE_CUES).srt
+    if temp.endswith(".mks"):
+        base = temp[:-4] + "-sample"
+        try:
+            subprocess.run(["mkvextract", "-q", temp, "tracks", f"0:{base}.idx"], capture_output=True, check=True)
+            with open(base + ".idx", encoding="utf-8", errors="replace") as f:
+                idx = f.read()
+            with open(base + ".sub", "rb") as f:
+                return ocr_subtitles.vobsub_to_srt(idx, f.read(), "und", limit=UNTAGGED_SAMPLE_CUES).srt
+        finally:
+            for extra in (base + ".idx", base + ".sub"):
+                with contextlib.suppress(OSError):
+                    os.remove(extra)
+    with open(temp, encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
+def identify_untagged(output_path: str, temps: dict[str, str], logger: logging.Logger,
+                      settings: Optional[Settings] = None) -> None:
+    """Name untagged streams (`.und<index>` entries of `temps`) after the language of their text, OCR'd from a
+    sample for a bitmap stream; a track with many sound descriptions or speaker labels is marked HI. European and
+    Brazilian Portuguese differ in too few words for a sample, so a Portuguese bitmap stream is OCR'd in full first
+    (an untrusted result goes to `ocr-rejected/` like any OCR). A stream whose language is
+    unclear or not wanted, or whose name a tagged stream already took, is dropped."""
+    import sidecar_names
+    legacy = get_legacy_converter()
+    for suffix in sorted(k for k in temps if k.startswith(".und")):
+        temp = temps.pop(suffix)
+        flags = [f for f in suffix.split(".")[2:-1] if f in ("hi", "forced")]
+        try:
+            text = _sample_text(temp)
+        except Exception as error:  # noqa: BLE001 - a broken stream shouldn't fail the job
+            logger.warning("Untagged subtitle %s could not be read (%s); dropped: %s", suffix, error, output_path)
+            text = ""
+        language = sidecar_names.detect_language(text) if text else None
+        if language in ("pt", "pt-BR") and temp.endswith((".sup", ".mks")) and settings is not None:
+            whole = {f".{language}.srt": temp}
+            ocr_bitmap_subtitles(output_path, whole, settings, logger)
+            if not whole:
+                continue  # OCR failed or untrusted: kept in ocr-rejected/
+            temp = next(iter(whole.values()))
+            with open(temp, encoding="utf-8", errors="replace") as f:
+                language = sidecar_names.detect_language(f.read()) or language
+        cues = [c for c in text.split("\n\n") if c.strip()]
+        new = None
+        if language and legacy.language_is_wanted(language.split("-")[0], legacy.wanted_subtitle_languages):
+            if "hi" not in flags and cues and sum(bool(_SOUND_CUE.search(c)) for c in cues) / len(cues) >= HI_CUE_SHARE:
+                flags.insert(0, "hi")
+            new = "." + language + "".join("." + f for f in flags) + ".srt"
+            if new in temps:
+                logger.info("Untagged subtitle %s reads as %s, already taken by another stream: %s",
+                            suffix, new, output_path)
+                new = None
+        if new is None:
+            if not language:
+                logger.info("Untagged subtitle %s: language unclear; dropped: %s", suffix, output_path)
+            elif not legacy.language_is_wanted(language.split("-")[0], legacy.wanted_subtitle_languages):
+                logger.info("Untagged subtitle %s reads as %s (not wanted): %s", suffix, language, output_path)
+            with contextlib.suppress(OSError):
+                os.remove(temp)
+            continue
+        temps[new] = temp
+        logger.info("Untagged subtitle %s identified as %s from its text: %s", suffix, new, output_path)
+
+
 def place_subtitles(output_path: str, temps: dict[str, str], settings: Settings, logger: logging.Logger,
                     fresh: frozenset = frozenset()) -> int:
-    """Bitmaps OCR'd or kept as they are (setting), forced tracks folded (SRT only), then installed."""
+    """Untagged streams named from their text, bitmaps OCR'd or kept as they are (setting), forced tracks folded
+    (SRT only), then installed."""
+    identify_untagged(output_path, temps, logger, settings)
     if get_legacy_converter().BITMAP_SUBTITLES == "sidecar":
         keep_bitmap_sidecars(temps, logger)
     else:
@@ -2246,6 +2333,7 @@ def retire_european_portuguese(video_path: str, settings: Settings, logger: logg
         try:
             os.makedirs(os.path.dirname(backup), exist_ok=True)
             shutil.move(path, backup + (f".{int(time.time())}" if os.path.exists(backup) else ""))
+            forget_protected(settings.database_path, path)
             moved += 1
             logger.info("European Portuguese subtitle moved aside (setting: %s): %s", policy, path)
         except OSError as error:
@@ -2359,6 +2447,7 @@ def fold_forced_subtitles(output_path: str, temps: dict[str, str], settings: Set
                 archive = os.path.join(data_dir, "forced-subtitles", (stem + suffix).lstrip("/"))
                 os.makedirs(os.path.dirname(archive), exist_ok=True)
                 shutil.move(temp, archive)
+                forget_protected(settings.database_path, temp)
                 if not targets:
                     logger.warning("Forced subtitle %s has no full track to merge into; archived at %s: %s",
                                    suffix, archive, output_path)
@@ -2429,6 +2518,7 @@ def strip_subtitles(conn: sqlite3.Connection, path: str, settings: Settings, cat
             enqueue_callback(conn, owner, time.time() + settings.callback_delay_seconds)
     bitmaps = {k: v for k, v in temps.items() if v.endswith((".sup", ".mks"))}
     texts = {k: v for k, v in temps.items() if k not in bitmaps}
+    identify_untagged(path, texts, logger, settings)  # untagged bitmaps: in place_subtitles, on the OCR side
     fold_forced_subtitles(path, texts, settings, logger)
     installed = install_subtitles(path, texts, settings, logger)
     fresh = frozenset(os.path.splitext(path)[0] + k for k in texts)
@@ -2498,6 +2588,92 @@ def _sha1(path: str) -> Optional[str]:
             return hashlib.sha1(handle.read()).hexdigest()
     except OSError:
         return None
+
+
+SIDECAR_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt", ".sup", ".idx", ".sub")
+PROTECT_SECONDS = 24 * 3600   # without a delete webhook, how long the subtitles of a renamed output are watched
+RELEASE_GRACE_SECONDS = 900   # after the delete webhook: Radarr/Sonarr may remove the extras just after sending it
+
+
+def protect_sidecars(conn: sqlite3.Connection, settings: Settings, input_path: str, output_path: str,
+                     logger: logging.Logger) -> int:
+    """Guard the subtitles of an output whose path differs from its source (`.m2ts`/`.mp4` -> `.mkv`). Radarr and
+    Sonarr see the old file missing from disk and delete the extra files they track with it (subtitles they renamed,
+    which have the same name as the new output's), permanently when their recycle bin is off. A copy of each subtitle
+    is kept in `<database dir>/protected-sidecars/` and put back if it disappears while the output still exists,
+    until shortly after the delete webhook for the source (or PROTECT_SECONDS without one)."""
+    stems = {os.path.splitext(input_path)[0], os.path.splitext(output_path)[0]}
+    folder = os.path.dirname(output_path)
+    root = os.path.join(os.path.dirname(settings.database_path), "protected-sidecars")
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return 0
+    now = time.time()
+    rows = []
+    for name in sorted(names):
+        path = os.path.join(folder, name)
+        if (not any(path.startswith(stem + ".") for stem in stems) or not name.lower().endswith(SIDECAR_EXTENSIONS)
+                or not os.path.isfile(path)):
+            continue
+        backup = os.path.join(root, path.lstrip("/"))
+        try:
+            os.makedirs(os.path.dirname(backup), exist_ok=True)
+            shutil.copy2(path, backup)
+        except OSError as error:
+            logger.warning("Could not protect subtitle %s: %s", path, error)
+            continue
+        rows.append((path, backup, output_path, input_path, now, now + PROTECT_SECONDS))
+    with conn:
+        conn.executemany("INSERT OR REPLACE INTO protected_sidecars(path, backup, video, source, created_at, release_at) "
+                         "VALUES(?,?,?,?,?,?)", rows)
+    if rows:
+        logger.info("Protecting %d subtitle file(s) of a renamed output from the *arr's extra-file cleanup: %s",
+                    len(rows), output_path)
+    return len(rows)
+
+
+def release_protected_sidecars(conn: sqlite3.Connection, source_path: str, now: Optional[float] = None) -> int:
+    """The delete webhook for a source arrived: stop watching its output's subtitles after a short grace."""
+    now = time.time() if now is None else now
+    with conn:
+        return conn.execute("UPDATE protected_sidecars SET release_at=MIN(release_at, ?) WHERE source=?",
+                            (now + RELEASE_GRACE_SECONDS, source_path)).rowcount
+
+
+def forget_protected(database_path: str, path: str) -> None:
+    """The converter itself moved this subtitle away on purpose: don't put it back."""
+    try:
+        conn = sqlite3.connect(database_path, timeout=30)
+        with conn:
+            conn.execute("DELETE FROM protected_sidecars WHERE path=?", (path,))
+        conn.close()
+    except sqlite3.Error:
+        pass
+
+
+def restore_protected_sidecars(conn: sqlite3.Connection, logger: logging.Logger, now: Optional[float] = None) -> int:
+    """Put back protected subtitles that disappeared while their video still exists; drop expired protections."""
+    now = time.time() if now is None else now
+    restored = 0
+    for row in conn.execute("SELECT path, backup, video, release_at FROM protected_sidecars").fetchall():
+        path, backup, video, release_at = row[0], row[1], row[2], row[3]
+        if not os.path.exists(path) and os.path.isfile(video) and os.path.isfile(backup):
+            try:
+                shutil.copy2(backup, path + ".restore")
+                os.replace(path + ".restore", path)
+                restored += 1
+                logger.warning("Subtitle restored after the *arr deleted it with the replaced source: %s", path)
+            except OSError as error:
+                logger.warning("Could not restore subtitle %s: %s", path, error)
+        if now >= release_at:
+            with conn:
+                conn.execute("DELETE FROM protected_sidecars WHERE path=?", (path,))
+            try:
+                os.remove(backup)
+            except OSError:
+                pass
+    return restored
 
 
 def record_sidecar_inventory(database_path: str, video_path: str) -> int:
@@ -3109,6 +3285,8 @@ def process_conversion_job(
         if subtitles:
             logger.info("Subtitles extracted: %d of %d (%s): %s", installed, len(subtitles),
                         ", ".join(s.suffix for s in subtitles), output_path)
+        if output_path != input_path:
+            protect_sidecars(conn, settings, input_path, output_path, logger)
         if legacy.DELETE:
             try:
                 os.remove(backup_path)
@@ -3399,6 +3577,7 @@ def run_worker(
             units_processed += 1
             continue
 
+        restore_protected_sidecars(conn, logger)
         if once:
             break
         time.sleep(settings.poll_seconds)

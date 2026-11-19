@@ -23,20 +23,31 @@ _WORDS = {
     "en": {"the", "you", "and", "what", "that", "it's", "don't", "i'm", "this", "with", "have", "your", "just"},
     "nl": {"het", "een", "niet", "wat", "dat", "ik", "je", "van", "maar", "zijn", "hij", "wel", "jij", "ook", "nog"},
     "pt": {"não", "você", "que", "isso", "está", "eu", "para", "com", "uma", "mas", "ele", "muito", "aqui", "tem"},
+    # languages that aren't kept, so their tracks are recognised (and dropped) rather than mistaken for the above
+    "es": {"qué", "eso", "pero", "con", "una", "del", "usted", "él", "muy", "aquí", "tengo", "bueno", "señor", "y"},
+    "fr": {"vous", "pas", "est", "c'est", "les", "une", "et", "mais", "oui", "qu'il", "moi", "suis", "ça", "bien"},
+    "de": {"ich", "nicht", "das", "ist", "und", "sie", "wir", "ein", "mir", "mich", "auch", "habe", "bin", "du"},
+    "it": {"non", "che", "sono", "per", "questo", "cosa", "bene", "grazie", "perché", "sei", "lei", "ho", "io", "hai"},
 }
-# European vs Brazilian Portuguese markers (the same ones subtitlerr's pt/pt-BR relabelling uses).
-_PT_PT = [r"\best(ou|ás|á|amos|ão) a [a-zç]+(ar|er|ir)\b", r"\btelemóve(l|is)\b", r"\bautocarros?\b", r"\becrã\b",
-          r"\bequipas?\b", r"\braparigas?\b", r"\bcasa de banho\b", r"\bfacto\b",
-          r"\btu (estás|tens|és|vais|queres|podes|sabes)\b", r"\bvós\b", r"\bpequeno-almoço\b", r"\bcomboios?\b"]
+# European vs Brazilian Portuguese markers: subtitlerr's relabelling set, extended and checked against a library's
+# 221 European and 400 Brazilian files (per file: "estar a" + infinitive 20.5 vs 0.2, gerund 0.0 vs 11.4). With "você"
+# at a quarter, random 300-cue stretches came out right in 219/219 European and 382/383 Brazilian cases.
+_PT_PT = [r"\best(ou|ás|á|amos|ão|ava|avas|ávamos|avam|ive|eve|iveram|ar) a [a-zçáéí]+(ar|er|ir)\b",
+          r"\btelemóve(l|is)\b", r"\bautocarros?\b", r"\becrã\b", r"\bequipas?\b", r"\braparigas?\b",
+          r"\bcasa de banho\b", r"\bfacto\b", r"\btu (estás|tens|és|vais|queres|podes|sabes|fazes|foste)\b",
+          r"\bvós\b", r"\bpequeno-almoço\b", r"\bcomboios?\b", r"\b(tenho|tens|tem|temos) a certeza\b",
+          r"\bmiúd[oa]s?\b", r"\bfixe\b"]
 _PT_BR = [r"\bvocê(s)?\b", r"\b(est|tô|tá)[a-z]* [a-z]+(ando|endo|indo)\b", r"\bcelular(es)?\b", r"\bônibus\b",
-          r"\bgarotas?\b", r"\bbanheiros?\b", r"\bcafé da manhã\b", r"\btrens?\b", r"\ba gente\b", r"\bcara\b"]
+          r"\bgarotas?\b", r"\bbanheiros?\b", r"\bcafé da manhã\b", r"\btrens?\b", r"\ba gente\b",
+          r"\bpra\b", r"\boi\b"]  # "você" first: it counts a quarter (European subtitles use it too, 3 per file)
 _TIMING = re.compile(r"^\s*\d+\s*$|-->")
 _MARKUP = re.compile(r"<[^>]+>|\{[^}]*\}")
 MIN_WORDS = 20  # marker words the winning language needs, and twice as many as the runner-up
 
 
 def detect_language(text: str) -> Optional[str]:
-    """The sidecar code for the language of an SRT text: en, nl, pt or pt-BR; None when unclear."""
+    """The sidecar code for the language of an SRT text: en, nl, pt or pt-BR (es, fr, de, it are recognised too, so
+    they aren't mistaken for one of those); None when unclear."""
     body = _MARKUP.sub(" ", "\n".join(l for l in text.splitlines() if not _TIMING.search(l))).lower()
     words = re.findall(r"[\wçãõáéíóúâêôà']+", body)
     counts = {lang: sum(1 for w in words if w in markers) for lang, markers in _WORDS.items()}
@@ -47,7 +58,7 @@ def detect_language(text: str) -> Optional[str]:
     if best != "pt":
         return best
     european = sum(len(re.findall(p, body)) for p in _PT_PT)
-    brazilian = sum(len(re.findall(p, body)) for p in _PT_BR)
+    brazilian = len(re.findall(_PT_BR[0], body)) / 4 + sum(len(re.findall(p, body)) for p in _PT_BR[1:])
     return "pt" if european > brazilian else "pt-BR"
 
 

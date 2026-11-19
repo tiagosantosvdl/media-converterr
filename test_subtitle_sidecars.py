@@ -32,7 +32,7 @@ class ExtractionTests(unittest.TestCase):
             {"index": 5, "codec_name": "hdmv_pgs_subtitle", "tags": {"language": "dut"}, "disposition": {}},
             {"index": 6, "codec_name": "subrip", "tags": {"language": "fre"}, "disposition": {}},
             {"index": 7, "codec_name": "subrip", "tags": {"language": "eng"}, "disposition": {}},   # duplicate name
-            {"index": 8, "codec_name": "subrip", "tags": {}, "disposition": {}},                    # untagged
+            {"index": 8, "codec_name": "subrip", "tags": {}, "disposition": {}},                    # untagged: last
             {"index": 9, "codec_name": "subrip", "tags": {"language": "pob"}, "disposition": {}},
             {"index": 10, "codec_name": "hdmv_pgs_subtitle", "tags": {"language": "eng"}, "disposition": {}},  # text wins
             {"index": 11, "codec_name": "dvd_subtitle", "tags": {"language": "por"}, "disposition": {}},
@@ -42,8 +42,9 @@ class ExtractionTests(unittest.TestCase):
             subs = mc5.subtitle_extractions("x.mkv")
         self.assertEqual([(s.index, s.suffix, s.kind) for s in subs],
                          [(2, ".en.srt", "text"), (3, ".en.hi.srt", "text"), (4, ".en.forced.srt", "text"),
-                          (9, ".pt-BR.srt", "text"), (5, ".nl.srt", "pgs"), (11, ".pt.srt", "vobsub")])
-        args, temps = mc5.subtitle_output_args(subs[-2:], "/work/temp.mkv")
+                          (9, ".pt-BR.srt", "text"), (5, ".nl.srt", "pgs"), (11, ".pt.srt", "vobsub"),
+                          (8, ".und8.srt", "text")])
+        args, temps = mc5.subtitle_output_args(subs[-3:-1], "/work/temp.mkv")
         self.assertEqual(args, ["-map", "0:5", "-c:s", "copy", "-f", "sup", "/work/temp.mkv.nl.srt.sup",
                                 "-map", "0:11", "-c:s", "copy", "-f", "matroska", "/work/temp.mkv.pt.srt.mks"])
         args, temps = mc5.subtitle_output_args(subs[:1], "/work/temp.mkv")

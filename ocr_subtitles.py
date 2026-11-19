@@ -14,7 +14,8 @@ import struct
 import subprocess
 from dataclasses import dataclass, field
 
-TESSERACT_LANG = {"en": "eng", "nl": "nld", "pt": "por", "pt-BR": "por"}
+TESSERACT_LANG = {"en": "eng", "nl": "nld", "pt": "por", "pt-BR": "por",
+                  "und": "eng+nld+por"}  # language unknown: read with every wanted model to tell which it is
 MIN_CONFIDENCE = 75.0   # mean Tesseract word confidence needed to install an OCR'd subtitle
 PAD = 12                # pixels of white border around each object (Tesseract reads edge text poorly)
 
@@ -172,10 +173,13 @@ class OcrResult:
         return self.cues > 0 and self.confidence >= MIN_CONFIDENCE
 
 
-def sup_to_srt(data: bytes, code: str) -> OcrResult:
+def sup_to_srt(data: bytes, code: str, limit: int | None = None) -> OcrResult:
+    """OCR a PGS stream into SRT; `limit` stops after that many subtitles (a sample)."""
     language = TESSERACT_LANG.get(code, "eng")
     blocks, confs = [], []
     for comp in parse_sup(data):
+        if limit is not None and len(blocks) >= limit:
+            break
         texts = []
         for oid, _x, y in sorted(comp.objects, key=lambda o: o[2]):  # top to bottom
             if oid not in comp.bitmaps:
@@ -337,7 +341,7 @@ def render_spu(spu: Spu, palette: list[tuple[int, int, int]]):
     return ImageOps.expand(img, border=PAD, fill=255)
 
 
-def vobsub_to_srt(idx_text: str, sub: bytes, code: str) -> OcrResult:
+def vobsub_to_srt(idx_text: str, sub: bytes, code: str, limit: int | None = None) -> OcrResult:
     language = TESSERACT_LANG.get(code, "eng")
     palette, entries = parse_idx(idx_text)
     spus = [parse_spu(_spu_packet(sub, pos), ts) for ts, pos in entries]
@@ -349,6 +353,8 @@ def vobsub_to_srt(idx_text: str, sub: bytes, code: str) -> OcrResult:
             a.end = b.start  # never overlap the next subtitle
     blocks, confs = [], []
     for spu in spus:
+        if limit is not None and len(blocks) >= limit:
+            break
         if spu.end <= spu.start:
             continue
         text, c = tesseract(render_spu(spu, palette), language)
