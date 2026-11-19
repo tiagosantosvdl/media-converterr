@@ -253,7 +253,13 @@ step validated before the next, and keep Linux behaviour unchanged (all tests, i
   Jellyfin and Wholphin don't recognise it ("pob - Undefined"), so `.pt-BR` stays.
 - **Blu-ray `.m2ts` streams carry no language tags** (they live in the disc's playlist files): every audio track is
   kept (dubs and commentaries included), as untagged audio always is. Subtitles are named from their text (see
-  above); detecting audio languages isn't implemented.
+  above); detecting audio languages isn't implemented. Measured on a UHD Blu-ray remux with 30 PGS tracks, tags
+  hidden: English, Dutch and Brazilian Portuguese named correctly, French/German/Italian recognised and dropped,
+  every other language dropped as unclear; about 35 s of OCR per track (150-cue sample). Limits seen: the Iberian
+  Portuguese track also read as `pt-BR` (the sample had too few variant markers; with a Brazilian track present it
+  loses the name and is dropped, as the European Portuguese fallback setting wants anyway), and the English SDH
+  track wasn't recognised as HI (few sound descriptions in its first cues), so next to a plain English track it is
+  dropped.
 
 - **Dolby Vision → HDR10+ not implemented:** DV output choices are HDR10 from the base layer (keeping HDR10+ when the
   source also has it), Dolby Vision 8.1, or SDR. Generating HDR10+ from the RPU's L1 values is still a proposal.
