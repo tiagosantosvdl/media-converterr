@@ -19,6 +19,10 @@ a durable queue, a weekly reconciliation scan and a web interface in the style o
   or `.idx/.sub`, or dropped) or kept in the container; forced tracks are merged into the full track.
 - **Tracks every file in SQLite** (path, size, mtime, device, inode), so converted files are never redone, and asks
   Sonarr/Radarr to rescan after each conversion so they pick up the new file; tells Jellyfin (optional) at once.
+- **Waits for Bazarr (optional):** a new file isn't converted until Bazarr has had its first subtitle searches
+  (by default at least 30 minutes, and while Bazarr still lacks subtitles, up to 6 hours), because a subtitle matched
+  by the original file's hash fits it exactly and no hash matches after the re-encode; Bazarr rescans the item after
+  each conversion.
 - **Survives restarts:** events and jobs are queued durably, with retries and backoff.
 
 ## Requirements
@@ -27,7 +31,7 @@ a durable queue, a weekly reconciliation scan and a web interface in the style o
   libplacebo, `hdr10plus_tool`, `dovi_tool`, MKVToolNix and Tesseract), or Python 3.11+ with those tools.
 - A GPU with hardware encoding is strongly recommended (see "Validated hardware"); the CPU works but is slow at 4K.
   NVIDIA needs the NVIDIA Container Toolkit (`--gpus all`); AMD AMF needs AMD's AMF runtime (VAAPI works without).
-- Sonarr and/or Radarr with API access; Jellyfin optional.
+- Sonarr and/or Radarr with API access; Jellyfin and Bazarr optional.
 
 ## Validated hardware
 
@@ -80,7 +84,7 @@ worker; any arguments run a single command instead (`docker run ... media-conver
 2. Copy `media_converterr.example.toml` to `<config>/media_converterr.toml`; with `api_key_file` the API keys are read
    from the mounted Sonarr/Radarr `config.xml` files.
 3. Adapt `compose.example.yaml` (paths, user, render group, languages) and start it.
-4. Open the web interface, create a login (or continue without one), and on **Settings** check the Sonarr/Radarr (and optional Jellyfin)
+4. Open the web interface, create a login (or continue without one), and on **Settings** check the Sonarr/Radarr (and optional Jellyfin and Bazarr)
    connections, enter the address Sonarr/Radarr use to reach this service, then **Test connections** and
    **Register webhooks**. Sonarr/Radarr must be able to reach the web port (for example a shared Docker network).
 

@@ -647,10 +647,14 @@ class Dashboard:
         stored = self.stored_connections()
         keys = {item.get("name"): item.get("api_key", "") for item in stored.get("instances", [])}
         jf = self.settings.jellyfin
+        bz = self.settings.bazarr
         return {"instances": [{"name": i.name, "type": i.kind, "url": i.url, "api_key": keys.get(i.name, ""),
                                "remote_root": i.remote_root, "local_root": i.local_root} for i in self.settings.instances],
                 "jellyfin": ({"url": jf.url, "api_key": (stored.get("jellyfin") or {}).get("api_key", ""),
                               "paths": [{"local": a, "remote": b} for a, b in jf.paths]} if jf else None),
+                "bazarr": ({"url": bz.url, "api_key": (stored.get("bazarr") or {}).get("api_key", ""),
+                            "min_wait_minutes": bz.min_wait_minutes, "max_wait_minutes": bz.max_wait_minutes}
+                           if bz else None),
                 "public_url": self.settings.public_url}
 
     def store_connections(self, connections: dict) -> str | None:
@@ -692,6 +696,16 @@ class Dashboard:
             body.append(f"<button class='card click add' type='button' data-open='jf'>{icon('plus', 45)}</button>")
         body.append("</div>")
         dialogs.append(self._jellyfin_dialog())
+        bz = s.bazarr
+        body.append("<h2>Bazarr</h2><div class='cards'>")
+        if bz:
+            body.append(f"<button class='card click' type='button' data-open='bz'><div class='title'>Bazarr</div>"
+                        f"<div>{label('Subtitles', 'info')}</div><div>{label('Wait for subtitles', 'ok')}"
+                        f"{label('On Convert', 'ok')}</div></button>")
+        else:
+            body.append(f"<button class='card click add' type='button' data-open='bz'>{icon('plus', 45)}</button>")
+        body.append("</div>")
+        dialogs.append(self._bazarr_dialog())
         rows = [[esc(i.name), f"<code>{esc(mc.webhook_url(s, i, token))}</code>"] for i in s.instances] \
             if s.public_url else []
         body.append("<h2>Webhooks</h2><form method='post' action='/settings/connect/address'>"
@@ -740,6 +754,39 @@ class Dashboard:
         return ui.dialog("jf", "Jellyfin", fields, action="/settings/connect/jellyfin",
                          test_url="/settings/connect/test-one?kind=jellyfin",
                          delete_action="/settings/connect/jellyfin/delete" if jf else "")
+
+    def _bazarr_dialog(self) -> str:
+        bz = self.settings.bazarr
+        fields = (form_group("URL", ui.text_input("url", bz.url if bz else "", placeholder="http://bazarr:6767"))
+                  + form_group("API Key", ui.text_input("api_key", kind="password", placeholder="saved" if bz else "",
+                                                        attrs="autocomplete='off'"),
+                               "Settings › General in Bazarr. Leave empty to keep the saved key.")
+                  + form_group("Minimum wait (minutes)",
+                               ui.text_input("min_wait_minutes", f"{bz.min_wait_minutes:g}" if bz else "30"),
+                               "A new file waits this long for Bazarr's first subtitle search before converting: "
+                               "a subtitle matched by the original file's hash fits it exactly, and after the "
+                               "re-encode no hash matches.")
+                  + form_group("Maximum wait (minutes)",
+                               ui.text_input("max_wait_minutes", f"{bz.max_wait_minutes:g}" if bz else "360"),
+                               "While Bazarr still lacks subtitles the file waits, up to this long."))
+        return ui.dialog("bz", "Bazarr", fields, action="/settings/connect/bazarr",
+                         test_url="/settings/connect/test-one?kind=bazarr",
+                         delete_action="/settings/connect/bazarr/delete" if bz else "")
+
+    def save_bazarr(self, form: dict) -> str | None:
+        if not first(form, "url"):
+            return "Enter Bazarr's URL."
+        conns = self.current_connections()
+        conns["bazarr"] = {"url": first(form, "url").rstrip("/"),
+                           "api_key": first(form, "api_key") or (conns["bazarr"] or {}).get("api_key", ""),
+                           "min_wait_minutes": first(form, "min_wait_minutes") or "30",
+                           "max_wait_minutes": first(form, "max_wait_minutes") or "360"}
+        return self.store_connections(conns)
+
+    def delete_bazarr(self) -> str | None:
+        conns = self.current_connections()
+        conns["bazarr"] = None
+        return self.store_connections(conns)
 
     def save_instance(self, form: dict) -> str | None:
         conns = self.current_connections()
@@ -820,11 +867,16 @@ class Dashboard:
         address = first(form, "public_url").rstrip("/")
         if address and not address.startswith(("http://", "https://")):
             return "The webhook address must start with http:// or https://"
-        return self.store_connections({"instances": instances, "jellyfin": jellyfin, "public_url": address})
+        return self.store_connections({"instances": instances, "jellyfin": jellyfin, "public_url": address,
+                                       "bazarr": previous.get("bazarr")})
 
     def test_one(self, kind: str, form: dict) -> tuple[bool, str]:
         """Test the values in an edit dialog before saving (an empty key: the saved or file key)."""
         try:
+            if kind == "bazarr":
+                saved = self.settings.bazarr
+                key = first(form, "api_key") or (saved.api_key if saved else "")
+                return True, mc.bazarr_status(mc.BazarrSettings(first(form, "url").rstrip("/"), key), self.settings)
             if kind == "jellyfin":
                 saved = self.settings.jellyfin
                 key = first(form, "api_key") or (saved.api_key if saved else "")
@@ -855,6 +907,11 @@ class Dashboard:
                 results.append(("Jellyfin", True, mc.jellyfin_status(self.settings.jellyfin, self.settings)))
             except RuntimeError as error:
                 results.append(("Jellyfin", False, str(error)))
+        if self.settings.bazarr:
+            try:
+                results.append(("Bazarr", True, mc.bazarr_status(self.settings.bazarr, self.settings)))
+            except RuntimeError as error:
+                results.append(("Bazarr", False, str(error)))
         return results or [("Connections", False, "none configured")]
 
     def register_webhooks(self) -> list[tuple[str, bool, str]]:
@@ -1190,12 +1247,15 @@ def make_handler(dash: Dashboard):
                     results=None if error else [("Settings", True, "saved")], error=error or ""))
             elif path in ("/settings/connect/instance", "/settings/connect/instance/delete",
                           "/settings/connect/jellyfin", "/settings/connect/jellyfin/delete",
+                          "/settings/connect/bazarr", "/settings/connect/bazarr/delete",
                           "/settings/connect/address"):
                 form = self._form()
                 action = {"/settings/connect/instance": dash.save_instance,
                           "/settings/connect/instance/delete": dash.delete_instance,
                           "/settings/connect/jellyfin": dash.save_jellyfin,
                           "/settings/connect/jellyfin/delete": lambda _form: dash.delete_jellyfin(),
+                          "/settings/connect/bazarr": dash.save_bazarr,
+                          "/settings/connect/bazarr/delete": lambda _form: dash.delete_bazarr(),
                           "/settings/connect/address": dash.save_address}[path]
                 error = action(form)
                 if error:

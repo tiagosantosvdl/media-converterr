@@ -108,6 +108,17 @@ class JellyfinSettings:
 
 
 @dataclass(frozen=True)
+class BazarrSettings:
+    """Optional: a new file waits for Bazarr's first subtitle searches before it is converted (a subtitle matched by
+    the original file's hash fits it exactly; after the re-encode no hash matches), and Bazarr rescans an item after
+    its file or subtitles changed."""
+    url: str
+    api_key: str
+    min_wait_minutes: float = 30.0   # always give Bazarr's search after the import this long
+    max_wait_minutes: float = 360.0  # convert anyway after this long (Bazarr searches missing subtitles every 6 h)
+
+
+@dataclass(frozen=True)
 class Settings:
     database_path: str
     source_database_path: str
@@ -127,6 +138,7 @@ class Settings:
     api_timeout_seconds: float
     hook_spool_dir: str
     jellyfin: Optional[JellyfinSettings] = None
+    bazarr: Optional[BazarrSettings] = None
     public_url: str = ""  # this service as Sonarr/Radarr reach it (for the webhooks they call)
 
     @property
@@ -308,6 +320,23 @@ def parse_jellyfin(raw: object) -> Optional[JellyfinSettings]:
     return None
 
 
+def parse_bazarr(raw: object) -> Optional[BazarrSettings]:
+    """[bazarr] table or stored value; None unless both a URL and a key are set."""
+    if not isinstance(raw, dict):
+        raise ConfigurationError("[bazarr] must be a table")
+    key = str(raw.get("api_key", "")) or os.environ.get(str(raw.get("api_key_env", "BAZARR_API_KEY")), "")
+    try:
+        low = float(raw.get("min_wait_minutes", 30))
+        high = float(raw.get("max_wait_minutes", 360))
+    except (TypeError, ValueError):
+        raise ConfigurationError("bazarr wait times must be numbers") from None
+    if low < 0 or high < low:
+        raise ConfigurationError("bazarr wait times: 0 <= min_wait_minutes <= max_wait_minutes")
+    if raw.get("url") and key:
+        return BazarrSettings(str(raw["url"]).rstrip("/"), key, low, high)
+    return None
+
+
 def apply_stored_connections(settings: Settings, stored: object) -> Settings:
     """Connections saved from the web interface replace the file's. A stored instance or Jellyfin entry with an
     empty API key keeps the key the file gives the same name (so keys can stay in config.xml or the environment)."""
@@ -324,6 +353,11 @@ def apply_stored_connections(settings: Settings, stored: object) -> Settings:
         if raw and not raw.get("api_key") and settings.jellyfin:
             raw = {**raw, "api_key": settings.jellyfin.api_key}
         changes["jellyfin"] = parse_jellyfin(raw) if raw else None
+    if "bazarr" in stored:
+        raw = stored["bazarr"]
+        if raw and not raw.get("api_key") and settings.bazarr:
+            raw = {**raw, "api_key": settings.bazarr.api_key}
+        changes["bazarr"] = parse_bazarr(raw) if raw else None
     if stored.get("public_url"):
         changes["public_url"] = str(stored["public_url"]).rstrip("/")
     return dataclasses.replace(settings, **changes)
@@ -414,6 +448,9 @@ def load_settings(config_path: str, *, use_store: bool = True) -> Settings:
     jellyfin = document.get("jellyfin")
     if jellyfin is not None:
         settings = dataclasses.replace(settings, jellyfin=parse_jellyfin(jellyfin))
+    bazarr = document.get("bazarr")
+    if bazarr is not None:
+        settings = dataclasses.replace(settings, bazarr=parse_bazarr(bazarr))
     if use_store:
         settings = apply_stored_connections(settings, settings_store.read(settings.database_path, "connections"))
         try:  # conversion policy saved from the web interface (module globals of the policy module)
@@ -528,6 +565,14 @@ CREATE TABLE IF NOT EXISTS callbacks (
 );
 CREATE INDEX IF NOT EXISTS callbacks_claim
     ON callbacks(state, available_at, updated_at);
+CREATE TABLE IF NOT EXISTS bazarr_matches (
+    path TEXT NOT NULL,
+    language TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    score REAL NOT NULL,
+    kind TEXT NOT NULL,
+    recorded_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS release_sidecars (
     sha1 TEXT PRIMARY KEY,
     path TEXT NOT NULL,
@@ -1266,6 +1311,131 @@ def jellyfin_status(jellyfin: JellyfinSettings, settings: Settings) -> str:
     except urllib.error.URLError as error:
         raise RuntimeError(f"Jellyfin request failed: {error.reason}") from error
     return f"Jellyfin {info.get('Version', '?')} ({info.get('ServerName', '')})"
+
+
+def bazarr_request(bazarr: BazarrSettings, method: str, endpoint: str, settings: Settings,
+                   params: Optional[Mapping[str, Any]] = None, form: Optional[Mapping[str, Any]] = None) -> Any:
+    url = f"{bazarr.url}/api/{endpoint}" + ("?" + urllib.parse.urlencode(params, doseq=True) if params else "")
+    data = urllib.parse.urlencode(form).encode() if form is not None else None
+    headers = {"X-API-KEY": bazarr.api_key, "Accept": "application/json"}
+    if data is not None:
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    request = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=settings.api_timeout_seconds) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f"Bazarr returned HTTP {error.code}") from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"Bazarr request failed: {error.reason}") from error
+    return json.loads(raw) if raw.strip() else None
+
+
+def bazarr_status(bazarr: BazarrSettings, settings: Settings) -> str:
+    info = bazarr_request(bazarr, "GET", "system/status", settings) or {}
+    data = info.get("data", info)
+    return f"Bazarr {data.get('bazarr_version', '?')}"
+
+
+def bazarr_item(bazarr: BazarrSettings, settings: Settings, owner: Ownership, path: str) -> Optional[dict]:
+    """Bazarr's record of the episode or movie whose file is `path` (its paths are the *arr's, translated here)."""
+    instance = settings.instance(owner.instance)
+    if owner.kind == "movie":
+        rows = (bazarr_request(bazarr, "GET", "movies", settings, {"radarrid[]": owner.entity_id}) or {}).get("data", [])
+    else:
+        rows = (bazarr_request(bazarr, "GET", "episodes", settings, {"seriesid[]": owner.entity_id}) or {}).get("data", [])
+    for row in rows:
+        try:
+            if row.get("path") and translate_remote_path(row["path"], instance) == path:
+                return row
+        except ConfigurationError:
+            continue
+    return None
+
+
+BAZARR_RECHECK_SECONDS = 1800
+
+
+def bazarr_gate(conn: sqlite3.Connection, row: sqlite3.Row, settings: Settings, owner: Optional[Ownership],
+                path: str, logger: logging.Logger) -> bool:
+    """True when the job may convert now. A file Bazarr still lacks subtitles for waits (the job goes back to the
+    queue) until Bazarr has nothing missing or the maximum wait has passed, and always the minimum wait after it was
+    queued. No Bazarr connection, no owner, a forced re-encode, or Bazarr unreachable: convert."""
+    bazarr = getattr(settings, "bazarr", None)
+    if bazarr is None or owner is None or ("force" in row.keys() and row["force"]):
+        return True
+    age = time.time() - float(row["enqueued_at"])
+    until = None
+    if age < bazarr.min_wait_minutes * 60:
+        until, reason = float(row["enqueued_at"]) + bazarr.min_wait_minutes * 60, "giving Bazarr's first search time"
+    elif age < bazarr.max_wait_minutes * 60:
+        try:
+            item = bazarr_item(bazarr, settings, owner, path)
+        except Exception as error:  # noqa: BLE001 - Bazarr down must not stop conversions
+            logger.warning("Bazarr check failed (%s); converting: %s", error, path)
+            return True
+        missing = [m.get("code2") or m.get("name") for m in (item or {}).get("missing_subtitles", [])]
+        if item is None or not missing:
+            return True
+        until = min(time.time() + BAZARR_RECHECK_SECONDS, float(row["enqueued_at"]) + bazarr.max_wait_minutes * 60)
+        reason = f"Bazarr still lacks {', '.join(str(m) for m in missing)}"
+    if until is None:
+        return True
+    with conn:
+        conn.execute("UPDATE jobs SET state='queued', available_at=?, started_at=NULL, last_error=? WHERE id=?",
+                     (until, f"waiting: {reason}", int(row["id"])))
+    logger.info("Waiting for Bazarr until %s (%s): %s", time.strftime("%H:%M", time.localtime(until)), reason, path)
+    return False
+
+
+_SCORE = re.compile(r"score of ([\d.]+)")
+
+
+def record_bazarr_matches(conn: sqlite3.Connection, settings: Settings, owner: Optional[Ownership], path: str,
+                          logger: logging.Logger) -> None:
+    """Remember how Bazarr matched this file's subtitles before the re-encode (by the file's hash, 359 of 360
+    points; by release group; or by name only), for deciding its minimum score. Never fails the job."""
+    bazarr = getattr(settings, "bazarr", None)
+    if bazarr is None or owner is None:
+        return
+    try:
+        item = bazarr_item(bazarr, settings, owner, path)
+        if item is None:
+            return
+        if owner.kind == "movie":
+            history = bazarr_request(bazarr, "GET", "movies/history", settings, {"radarrid": owner.entity_id})
+        else:
+            history = bazarr_request(bazarr, "GET", "episodes/history", settings,
+                                     {"episodeid": item.get("sonarrEpisodeId")})
+        rows = []
+        for h in (history or {}).get("data", []):
+            match = _SCORE.search(str(h.get("description") or ""))
+            if h.get("action") != 1 or not match:  # 1 = downloaded
+                continue
+            score = float(match[1])
+            rows.append((path, str((h.get("language") or {}).get("code2") or ""), str(h.get("provider") or ""), score,
+                         "hash" if score >= 99.7 else "release" if score >= 95 else "name", time.time()))
+        with conn:
+            conn.executemany("INSERT INTO bazarr_matches(path, language, provider, score, kind, recorded_at) "
+                             "VALUES(?,?,?,?,?,?)", rows)
+        if rows:
+            logger.info("Bazarr matches before converting: %s: %s",
+                        ", ".join(f"{r[1]} {r[3]:.1f} ({r[4]})" for r in rows), path)
+    except Exception as error:  # noqa: BLE001
+        logger.warning("Could not record Bazarr matches for %s: %s", path, error)
+
+
+def bazarr_rescan(settings: Settings, owner: Optional[Ownership], logger: logging.Logger) -> None:
+    """Ask Bazarr to rescan an item's files and subtitles (after a conversion or extracted subtitles)."""
+    bazarr = getattr(settings, "bazarr", None)
+    if bazarr is None or owner is None:
+        return
+    form = ({"radarrid": owner.entity_id, "action": "scan-disk"} if owner.kind == "movie"
+            else {"seriesid": owner.entity_id, "action": "scan-disk"})
+    try:
+        bazarr_request(bazarr, "PATCH", "movies" if owner.kind == "movie" else "series", settings, form=form)
+    except Exception as error:  # noqa: BLE001
+        logger.warning("Bazarr rescan failed for %s %s: %s", owner.kind, owner.entity_id, error)
 
 
 def api_request(
@@ -2618,6 +2788,7 @@ def strip_subtitles(conn: sqlite3.Connection, path: str, settings: Settings, cat
         logger.info("Subtitles moved out: %d of %d streams extracted (%s), file remuxed without subtitles: %s",
                     done, kinds.count("subtitle"), ", ".join(e.suffix for e in extractions) or "none wanted", path)
         jellyfin_media_updated(settings, [path], logger)
+        bazarr_rescan(settings, owner, logger)
 
     (background or (lambda fn: fn()))(finish)
     return "done"
@@ -3368,6 +3539,9 @@ def process_conversion_job(
         return
     if forced:
         logger.warning("Re-encode requested: %s", input_path)
+    if not bazarr_gate(conn, row, settings, owner, input_path, logger):
+        return
+    record_bazarr_matches(conn, settings, owner, input_path, logger)
 
     output_path = normalize_path(legacy.to_target_naming(input_path))
     legacy.ensure_output_path_available(input_path, output_path)
@@ -3503,6 +3677,7 @@ def process_conversion_job(
         logger.info("%s success: %s -> %s", "Remux" if remux else "Encoding", input_path, output_path)
         jellyfin_media_updated(settings, [output_path], logger,
                                deleted=[input_path] if output_path != input_path else [])
+        bazarr_rescan(settings, owner, logger)
     except SourceChangedError:
         legacy.cleanup_temp(temp_path, logger)
         _remove_temps(locals().get("subtitle_temps"))
