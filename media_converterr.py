@@ -1695,6 +1695,19 @@ def stored_owner_for_path(conn: sqlite3.Connection, path: str) -> Optional[Owner
     return owner_from_row(get_file_row(conn, path))
 
 
+def library_dirs(names: list[str], exclude: Iterable[str] = ()) -> list[str]:
+    """Folders a library walk enters: not excluded by name and not hidden (`.recycle-bin`, `.Trash-1000`, staging
+    folders: other programs keep files there that are not library videos)."""
+    return [name for name in names if name not in exclude and not name.startswith(".")]
+
+
+def walk_library(base: str, exclude: Iterable[str] = (), onerror=None):
+    """os.walk over a library folder, skipping excluded and hidden folders."""
+    for root, dirs, files in os.walk(base, topdown=True, onerror=onerror):
+        dirs[:] = library_dirs(dirs, exclude)
+        yield root, dirs, files
+
+
 def collect_scan_paths(
     settings: Settings,
     logger: logging.Logger,
@@ -1723,8 +1736,7 @@ def collect_scan_paths(
             scan_errors.append(error)
             logger.warning("Scan error for %s: %s", base_path, error)
 
-        for root, dirs, files in os.walk(base_path, topdown=True, onerror=record_error):
-            dirs[:] = [name for name in dirs if name not in settings.exclude]
+        for root, dirs, files in walk_library(base_path, settings.exclude, onerror=record_error):
             for filename in files:
                 extension = filename.rsplit(".", 1)[-1].lower()
                 if extension in settings.convertible_extensions and not filename.startswith("."):  # hidden = temp files
@@ -2619,8 +2631,7 @@ def fold_forced_sidecars(settings: Settings, logger: logging.Logger, dry_run: bo
     import forced_subs
     counts = {"forced": 0, "cues added": 0, "no full track": 0, "full track": 0, "review": 0}
     for base in settings.scan_roots:
-        for root, dirs, files in os.walk(base):
-            dirs[:] = [d for d in dirs if d not in settings.exclude]
+        for root, dirs, files in walk_library(base, settings.exclude):
             for name in files:
                 match = FORCED_SIDECAR.match(name)
                 if not match:
@@ -3018,7 +3029,7 @@ def repair_after_rename(pairs: Sequence[tuple[str, Optional[str]]], settings: Se
     others = []
     if folder and os.path.isdir(folder):
         named = {path for path, _ in pairs}
-        for root, _, files in os.walk(folder):
+        for root, _, files in walk_library(folder):
             others += [(os.path.join(root, f), None) for f in files
                        if os.path.splitext(f)[1].lower().lstrip(".") in sidecar_names_video_extensions()
                        and not f.startswith(".") and os.path.join(root, f) not in named]
@@ -3048,7 +3059,7 @@ def repair_sidecars_pass(settings: Settings, logger: logging.Logger, paths: Sequ
     videos = []
     for path in paths:
         if os.path.isdir(path):
-            videos += sorted(os.path.join(d, f) for d, _, files in os.walk(path) for f in files
+            videos += sorted(os.path.join(d, f) for d, _, files in walk_library(path) for f in files
                              if f.lower().endswith(sidecar_names.VIDEO_EXTENSIONS) and not f.startswith("."))
         else:
             videos.append(path)
@@ -3076,8 +3087,7 @@ def learn_languages_from_library(conn: sqlite3.Connection, settings: Settings, l
     import sidecar_names
     counts: dict[str, int] = {}
     for base in settings.scan_roots:
-        for root, dirs, files in os.walk(base):
-            dirs[:] = [d for d in dirs if d not in settings.exclude and not d.startswith(".")]
+        for root, dirs, files in walk_library(base, settings.exclude):
             videos = [os.path.splitext(f)[0] for f in files if f.lower().endswith(sidecar_names.VIDEO_EXTENSIONS)]
             for name in files:
                 if not name.lower().endswith(".srt"):

@@ -1734,7 +1734,7 @@ def main() -> int:
                 topdown=True,
                 onerror=record_scan_error,
             ):
-                dirs[:] = [d for d in dirs if d not in exclude]
+                dirs[:] = [d for d in dirs if d not in exclude and not d.startswith(".")]  # hidden: not library
                 for fname in files:
                     full = normalize_path(os.path.join(root, fname))
                     ext = fname.rsplit('.', 1)[-1].lower()
